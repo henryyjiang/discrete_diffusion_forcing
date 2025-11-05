@@ -12,7 +12,7 @@ paths:
 denoiser:
   encoder:
     name: 'dream'
-    mask_id: 151666
+    mask_id: 126336
 
   decoder:
     wiinit: true

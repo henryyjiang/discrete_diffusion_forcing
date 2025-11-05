@@ -12,13 +12,13 @@ paths:
 denoiser:
   encoder:
     name: 'dream'
-    mask_id: 151666
+    mask_id: 126336
 
   decoder:
     wiinit: true
     name: 'eagle_rope'
     num_blocks: 1
-    seq_len: &seq_len 1024
+    seq_len: &seq_len 256
     input_dim: 3584
     hidden_dim: &dim 3584
     vocab_size: 152064
@@ -38,7 +38,7 @@ train:
   output_dir: 'ddt_test'
   logging_dir: 'logs'
   mixed_precision: 'fp16'
-  gradient_accumulation_steps: 5
+  gradient_accumulation_steps: 16
   report_to: 'wandb'
   block_size: 16
   
