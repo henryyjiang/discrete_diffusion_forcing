@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Introducing Discrete Diffusion Forcing (D2F), a novel hybrid paradigm that enables Diffusion LLMs to surpass autoregressive models in inference speed for the first time, achieving up to 50x acceleration.">
+    
+    <!-- Open Graph meta tags for social sharing -->
+    <meta property="og:title" content="D2F: Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing">
+    <meta property="og:description" content="Meet Discrete Diffusion Forcing (D2F), a novel paradigm that makes Diffusion LLMs up to 2.5x faster than leading AR models, finally unlocking their parallel potential.">
+    <meta property="og:image" content="assets/img/d2f/fig1_main_result.png">
+
+    <title>D2F: Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing</title>
+    
+    <!-- Google Fonts: Inter for headings/UI, Lora for body text -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Lora:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+
+    <style>
+        /* CSS Variables for easy theme management */
+        :root {
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --font-serif: 'Lora', 'Georgia', serif;
+            
+            --color-text: #374151; /* Dark gray for body text */
+            --color-heading: #111827; /* Near black for headings */
+            --color-background: #f9fafb; /* Very light gray background */
+            --color-primary: #2563eb; /* A strong, academic blue */
+            --color-primary-hover: #1d4ed8;
+            --color-secondary: #333;
+            --color-secondary-hover: #000;
+            --color-border: #e5e7eb; /* Light border color */
+            --color-subtle-bg: #f3f4f6; /* Background for code blocks and table headers */
+            --color-green-text: #16a34a; /* A nice, accessible green */
+        }
+
+        /* Basic Reset and Body Styling */
+        *, *::before, *::after {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: var(--font-serif);
+            line-height: 1.8;
+            color: var(--color-text);
+            background-color: var(--color-background);
+            margin: 0;
+            padding: 0;
+            font-size: 17px; /* A slightly larger base font size for readability */
+        }
+
+        /* Main Content Container */
+        .container {
+            max-width: 840px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        /* --- HEADER LAYOUT OPTIMIZATION --- */
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+            padding-bottom: 30px;
+            border-bottom: 1px solid var(--color-border);
+        }
+        
+        .header-logo {
+            width: 250px; /* A slightly smaller, refined logo size */
+            height: auto;
+            margin-bottom: 25px;
+        }
+
+        h1 {
+            font-family: var(--font-sans);
+            font-size: 2.6em; /* Adjusted for better balance */
+            font-weight: 800;
+            margin: 0 0 0.5em 0;
+            color: var(--color-heading);
+            line-height: 1.2;
+            letter-spacing: -0.5px;
+        }
+
+        /* Author and Affiliation Styling */
+        .authors {
+            font-family: var(--font-sans);
+            font-size: 1.1em;
+            color: var(--color-text);
+            margin: 20px 0 30px;
+        }
+        .authors span {
+            display: block;
+            margin-top: 8px;
+            font-family: var(--font-serif);
+            font-style: italic;
+            font-size: 1em;
+            color: #6b7280;
+        }
+        
+        /* Quick Links / Buttons */
+        .links {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .links a {
+            font-family: var(--font-sans);
+            text-decoration: none;
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: background-color 0.2s ease-in-out, transform 0.2s ease-in-out;
+            display: inline-block;
+        }
+        .links a:hover {
+            transform: translateY(-2px);
+        }
+        .links a.black-button {
+            background-color: var(--color-secondary);
+        }
+        .links a.black-button:hover {
+            background-color: var(--color-secondary-hover);
+        }
+        .links a[href*="github"] {
+             background-color: var(--color-primary);
+        }
+        .links a[href*="github"]:hover {
+             background-color: var(--color-primary-hover);
+        }
+
+        /* Main Article Content */
+        h3, h4 {
+            font-family: var(--font-sans);
+            font-weight: 700;
+            color: var(--color-heading);
+            line-height: 1.3;
+        }
+
+        h3 {
+            font-size: 2em;
+            margin-top: 3em;
+            margin-bottom: 1.2em;
+            padding-bottom: 10px;
+            border-bottom: 2px solid var(--color-primary);
+        }
+        
+        h4 {
+            font-size: 1.5em;
+            margin-top: 2.5em;
+            margin-bottom: 1em;
+        }
+        
+        /* --- NATIVE HTML TABLE STYLING --- */
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.2em 0;
+            font-family: var(--font-sans);
+            font-size: 0.95em;
+            box-shadow: 0 4px 15px -5px rgba(0, 0, 0, 0.06);
+            border-radius: 8px;
+            overflow: hidden; /* Important for border-radius to work on tables */
+        }
+        .results-table th, .results-table td {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--color-border);
+            text-align: center;
+        }
+        .results-table thead th {
+            background-color: var(--color-subtle-bg);
+            font-weight: 600;
+            color: var(--color-heading);
+            border-bottom: 2px solid var(--color-border);
+        }
+        .results-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+        .results-table tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+        .speedup {
+            color: var(--color-green-text);
+            font-weight: 600;
+        }
+        .results-table strong { /* For best scores */
+             color: var(--color-heading);
+             font-weight: 700;
+        }
+
+        p, ol, ul {
+            margin-bottom: 1.5em;
+        }
+        
+        strong {
+            font-weight: 600;
+            color: var(--color-heading);
+        }
+
+        a {
+            color: var(--color-primary);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        a:hover {
+            color: var(--color-primary-hover);
+            text-decoration: underline;
+        }
+        
+        ul, ol {
+            padding-left: 30px;
+        }
+        
+        li {
+            margin-bottom: 0.8em;
+        }
+
+        /* Figure and Image/Video Styling */
+        figure {
+            margin: 50px 0;
+            text-align: center;
+        }
+        figure img, figure video {
+            max-width: 100%;
+            height: auto;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.07), 0 4px 6px -4px rgba(0, 0, 0, 0.05);
+            border: 1px solid var(--color-border);
+        }
+        figcaption {
+            margin-top: 20px;
+            font-size: 0.9em;
+            color: #6b7280;
+            line-height: 1.6;
+            max-width: 680px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        figcaption b {
+            font-family: var(--font-sans);
+            color: var(--color-text);
+            font-weight: 600;
+        }
+
+        /* Code Block for Citation */
+        pre {
+            background-color: var(--color-subtle-bg);
+            padding: 25px;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid var(--color-border);
+            margin-top: 1em;
+        }
+        code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 0.95em;
+            color: var(--color-text);
+        }
+        article p > code { /* Inline code */
+            background-color: var(--color-subtle-bg);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        /* Implementation Notes block */
+        .note-block {
+            background: var(--color-subtle-bg);
+            border: 1px solid var(--color-border);
+            padding: 20px 22px;
+            border-radius: 8px;
+            font-family: var(--font-sans);
+            font-size: 0.95em;
+            line-height: 1.6;
+            margin: 2em 0;
+        }
+        .note-block h5 {
+            margin-top: 0;
+            font-size: 1.05em;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+        .note-block ul {
+            margin-top: 0.5em;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <img src="assets/img/d2f/logo_ud.jpg" alt="D2F Logo" class="header-logo">
+            <h1>D2F: Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing</h1>
+            
+            <div class="authors">
+                <strong>Xu Wang*, Chenkai Xu*, Yijie Jin, Jiachun Jin, Hao Zhang, Zhijie Deng<sup>†</sup></strong>
+                <span>Shanghai Jiao Tong University, University of California San Diego</span>
+                <span style="font-style: normal; font-size: 0.9em; margin-top: 10px;"><sup>*</sup> Equal Contribution    <sup>†</sup> Corresponding Author</span>
+            </div>
+
+            <div class="links">
+                <a href="https://arxiv.org/abs/2508.09192" target="_blank" class="black-button">📄 Paper</a>
+                <a href="https://github.com/zhijie-group/Discrete-Diffusion-Forcing" target="_blank" class="black-button">💻 Code</a>
+                <a href="https://huggingface.co/spaces/zhijie3/D2F-LLaDA-Instruct-8B" target="_blank" class="black-button">🚀 Online Demo</a>
+                <a href="https://huggingface.co/SJTU-Deng-Lab/D2F_Dream_Base_7B_Lora" target="_blank" class="black-button">🤗 D2F-Dream</a>
+                <a href="https://huggingface.co/SJTU-Deng-Lab/D2F_LLaDA_Instruct_8B_Lora" target="_blank" class="black-button">🤗 D2F-LLaDA</a>
+            </div>
+        </header>
+
+        <article>
+            <figure>
+                <video width="100%" autoplay loop muted playsinline>
+                    <source src="assets/video/d2f_vs_ar_demo.mp4" type="video/mp4">
+                    Your browser does not support the video tag. This video shows a side-by-side comparison of D2F's parallel generation vs. an AR model's sequential generation.
+                </video>
+                <figcaption>
+                    Real-time demo comparing our D2F-dLLM (left) and a baseline AR model (right). D2F generates text in parallel blocks, achieving significantly higher throughput.
+                </figcaption>
+            </figure>
+
+            <p>Diffusion Large Language Models (dLLMs) have long held the promise of ultra-fast text generation through parallel decoding. Yet, this promise has remained unfulfilled—until now. In practice, open-source dLLMs have consistently lagged behind their autoregressive (AR) counterparts like LLaMA3 in inference speed, hindering their real-world adoption.</p>
+
+            <p>Today, we are excited to introduce <strong>Discrete Diffusion Forcing (D2F)</strong>, a simple yet powerful strategy that shatters this speed limit. D2F creates a novel AR-diffusion hybrid model that achieves up to a <strong>2.5x speedup over leading AR models</strong> and a staggering <strong>50x acceleration over vanilla dLLMs</strong>, all while maintaining comparable output quality.</p>
+            
+            <figure>
+                <img src="assets/img/d2f/fig1_main_result.png" alt="Bar chart comparing inference throughput of D2F with other DLLMs and AR models.">
+                <figcaption>
+                    <b>Figure 1.</b> D2F dLLMs surpass similarly-sized autoregressive (AR) models in inference speed for the first time, achieving up to <b>2.5x</b> higher throughput than LLaMA3 and Qwen2.5 (Speed tests conducted on NVIDIA A100-PCIe-40GB GPUs). This comparison includes vanilla dLLMs, previous acceleration methods, and AR baselines.
+                </figcaption>
+            </figure>
+
+            <h3>The Bottleneck: Why Were Diffusion LLMs Slow?</h3>
+            <p>The potential of dLLMs lies in parallel decoding, but two fundamental issues have historically crippled their speed:</p>
+            <ul>
+                <li><strong>KV Cache Incompatibility:</strong> The problem starts with <strong>bidirectional attention</strong>, where every token can see every other token. This holistic view is powerful for quality but prevents the use of the Key-Value (KV) Cache—a critical optimization in AR models that saves massive amounts of redundant computation.</li>
+                <li><strong>Strict Inter-Block Dependency:</strong> Previous attempts to enable caching by generating text in blocks were still stuck. They required each block to be fully denoised before starting the next, killing any hope of true parallel processing across blocks.</li>
+            </ul>
+
+            <h3>The D2F Solution: A Hybrid of Speed and Power</h3>
+            <p>D2F overcomes these bottlenecks by rethinking how dLLMs are trained and how they generate text. It's a two-part solution.</p>
+
+            <h4>Architecture: Block-wise AR meets Parallel Diffusion</h4>
+            <p>At its core, D2F reframes generation as a <strong>block-autoregressive</strong> process. Text is produced in sequential blocks, but with a crucial architectural twist in the attention mechanism:</p>
+            <ul>
+                <li>Attention <em>within</em> a block remains <strong>bidirectional</strong> to capture rich local context.</li>
+                <li>Attention <em>between</em> blocks is made <strong>causal</strong>, meaning a block only attends to previously completed blocks.</li>
+            </ul>
+            <p>This smart hybrid design makes D2F fully compatible with the standard KV cache, slashing a huge source of computational waste.</p>
+
+            <h4>Method: Asymmetric Distillation and Pipelined Inference</h4>
+            <p>With this new architecture, D2F uses an elegant strategy for training and inference:</p>
+            <p><strong>Training with Asymmetric Distillation:</strong> Instead of costly training from scratch, we use an efficient distillation process. A powerful, pre-trained dLLM (the "teacher") distills its knowledge into our D2F model (the "student"). The teacher uses its full bidirectional view to make predictions, while the student learns to match them using only its limited, block-wise causal view. This process transfers the teacher's capabilities into our faster, cache-friendly architecture in just 12 hours on 8 A100 GPUs.</p>
+            
+            <figure>
+                <img src="assets/img/d2f/fig3_overview.png" alt="Diagram showing the asymmetric distillation process for D2F.">
+                <figcaption>
+                    <b>Figure 2.</b> Overview of our training method, Discrete Diffusion Forcing (D2F). A D2F model with a <b>block-wise causal attention mask</b> (the student) is trained to mimic the predictions of a pre-trained bidirectional dLLM (the teacher). This enables KV caching while learning to perform parallel decoding across blocks.
+                </figcaption>
+            </figure>
+
+            <p><strong>Inference with a Pipelined Parallel Decoder:</strong> This is where D2F’s speed truly shines. Because the model is trained to predict future blocks from <strong>partially incomplete</strong> ones, it doesn't need to wait. During inference, it runs a dynamic pipeline:</p>
+
+            <figure>
+                <video width="100%" autoplay loop muted playsinline>
+                    <source src="assets/video/block_demo.mp4" type="video/mp4">
+                    Your browser does not support the video tag. This video shows a slow-motion demo of internal block generation in D2F.
+                </video>
+                <figcaption>
+                    <b>Figure 3.</b> A slow-motion demonstration of the parallel decoding process within a single block of D2F. Watch as multiple tokens within the block are refined simultaneously, showcasing the efficiency of our approach.
+                </figcaption>
+            </figure>
+
+            <ul>
+                <li>A new block is added to the pipeline as soon as its predecessor is only partially complete.</li>
+                <li>Blocks begin in a conservative "semi-activated" state and transition to an aggressive "fully-activated" state once they have enough context from the block before them.</li>
+            </ul>
+            <p>This creates a highly efficient, asynchronous workflow where multiple blocks are refined in parallel, maximizing GPU utilization and dramatically boosting throughput.</p>
+
+            <figure>
+                <img src="assets/img/d2f/fig4_pipeline.png" alt="Visualization of the pipelined parallel decoding workflow.">
+                <figcaption>
+                    <b>Figure 4.</b> Visualization of our pipelined parallel decoding algorithm. A dynamic pipeline of blocks is decoded in parallel. New blocks are added once their predecessor is partially complete, and transition from a conservative 'semi-activated' state to an aggressive 'fully-activated' state, maximizing throughput.
+                </figcaption>
+            </figure>
+
+            <h3>Putting D2F to the Test: Performance Highlights</h3>
+            <p>D2F sets a new standard for dLLM efficiency across multiple benchmarks. We applied our D2F method to two popular open-source dLLMs, LLaDA and Dream, and the results speak for themselves.</p>
+
+            <h4>Detailed Benchmark Results: LLaDA-Instruct-8B</h4>
+            <p>Our D2F method dramatically boosts speed for LLaDA, achieving up to a <strong>52.9x</strong> increase in throughput on MBPP and a <strong>29.1x</strong> increase on HumanEval compared to the baseline, while significantly outperforming previous SOTA acceleration methods.</p>
+            
+            <h5>GSM8K-4-shot</h5>
+            <table class="results-table">
+                <thead><tr><th>Method</th><th>TPS ↑</th><th>Latency (s) ↓</th><th>Gen. Length</th><th>Score ↑</th></tr></thead>
+                <tbody>
+                    <tr><td>LLaDA-Instruct</td><td>7.2 <span class="speedup">(1.0x)</span></td><td>32.3 <span class="speedup">(1.0x)</span></td><td>231</td><td>77.4</td></tr>
+                    <tr><td>dLLM-Cache</td><td>20.1 <span class="speedup">(2.8x)</span></td><td>11.5 <span class="speedup">(2.8x)</span></td><td>231</td><td>77.5</td></tr>
+                    <tr><td>Fast-dLLM (Prefix-Cache)</td><td>33.3 <span class="speedup">(4.6x)</span></td><td>7.0 <span class="speedup">(4.6x)</span></td><td>232</td><td>77.8</td></tr>
+                    <tr><td>Fast-dLLM (Dual-Cache)</td><td>35.2 <span class="speedup">(4.9x)</span></td><td>6.6 <span class="speedup">(4.9x)</span></td><td>232</td><td><strong>78.9</strong></td></tr>
+                    <tr><td><strong>D2F-LLaDA</strong></td><td><strong>52.5 <span class="speedup">(7.3x)</span></strong></td><td><strong>2.8 <span class="speedup">(11.5x)</span></strong></td><td>144</td><td>77.3</td></tr>
+                </tbody>
+            </table>
+
+            <h5>MBPP-3-shot</h5>
+            <table class="results-table">
+                <thead><tr><th>Method</th><th>TPS ↑</th><th>Latency (s) ↓</th><th>Gen. Length</th><th>Score ↑</th></tr></thead>
+                <tbody>
+                    <tr><td>LLaDA-Instruct</td><td>0.9 <span class="speedup">(1.0x)</span></td><td>71.4 <span class="speedup">(1.0x)</span></td><td>65</td><td><strong>39.0</strong></td></tr>
+                    <tr><td>dLLM-Cache</td><td>2.3 <span class="speedup">(2.6x)</span></td><td>28.3 <span class="speedup">(2.5x)</span></td><td>66</td><td>37.0</td></tr>
+                    <tr><td>Fast-dLLM (Prefix-Cache)</td><td>13.0 <span class="speedup">(14.4x)</span></td><td>4.9 <span class="speedup">(14.6x)</span></td><td>64</td><td>37.6</td></tr>
+                    <tr><td>Fast-dLLM (Dual-Cache)</td><td>15.3 <span class="speedup">(17.0x)</span></td><td>3.8 <span class="speedup">(18.8x)</span></td><td>58</td><td>36.4</td></tr>
+                    <tr><td><strong>D2F-LLaDA</strong></td><td><strong>47.6 <span class="speedup">(52.9x)</span></strong></td><td><strong>1.4 <span class="speedup">(51.0x)</span></strong></td><td>68</td><td>38.0</td></tr>
+                </tbody>
+            </table>
+
+            <h4>Detailed Benchmark Results: Dream-Base-7B</h4>
+            <p>Applying D2F to Dream-Base-7B results in substantial gains, including a <strong>9.6x</strong> speedup on GSM8K-CoT and a <strong>10.1x</strong> speedup on MBPP. Notably, the performance score often improves alongside the speed.</p>
+            
+            <h5>GSM8K-CoT-8-shot</h5>
+            <table class="results-table">
+                 <thead><tr><th>Method</th><th>TPS ↑</th><th>Latency (s) ↓</th><th>Gen. Length</th><th>Score ↑</th></tr></thead>
+                 <tbody>
+                    <tr><td>Dream-Base</td><td>9.5 <span class="speedup">(1.0x)</span></td><td>26.8 <span class="speedup">(1.0x)</span></td><td>255</td><td>75.0</td></tr>
+                    <tr><td>dLLM-Cache</td><td>26.0 <span class="speedup">(2.7x)</span></td><td>9.8 <span class="speedup">(2.7x)</span></td><td>255</td><td>72.0</td></tr>
+                    <tr><td>Fast-dLLM (Prefix-Cache)</td><td>50.3 <span class="speedup">(5.3x)</span></td><td>5.1 <span class="speedup">(5.3x)</span></td><td>255</td><td>76.6</td></tr>
+                    <tr><td>Fast-dLLM (Dual-Cache)</td><td>49.8 <span class="speedup">(5.2x)</span></td><td>5.1 <span class="speedup">(5.3x)</span></td><td>255</td><td>75.0</td></tr>
+                    <tr><td><strong>D2F-Dream</strong></td><td><strong>91.2 <span class="speedup">(9.6x)</span></strong></td><td><strong>2.8 <span class="speedup">(9.6x)</span></strong></td><td>256</td><td><strong>77.6</strong></td></tr>
+                </tbody>
+            </table>
+
+            <h5>MBPP-3-shot</h5>
+            <table class="results-table">
+                 <thead><tr><th>Method</th><th>TPS ↑</th><th>Latency (s) ↓</th><th>Gen. Length</th><th>Score ↑</th></tr></thead>
+                 <tbody>
+                    <tr><td>Dream-Base</td><td>10.4 <span class="speedup">(1.0x)</span></td><td>24.6 <span class="speedup">(1.0x)</span></td><td>256</td><td>56.2</td></tr>
+                    <tr><td>dLLM-Cache</td><td>25.5 <span class="speedup">(2.5x)</span></td><td>10.0 <span class="speedup">(2.5x)</span></td><td>256</td><td>52.6</td></tr>
+                    <tr><td>Fast-dLLM (Prefix-Cache)</td><td>71.6 <span class="speedup">(6.9x)</span></td><td>3.6 <span class="speedup">(6.8x)</span></td><td>256</td><td><strong>56.4</strong></td></tr>
+                    <tr><td>Fast-dLLM (Dual-Cache)</td><td>73.2 <span class="speedup">(7.0x)</span></td><td>3.5 <span class="speedup">(7.0x)</span></td><td>256</td><td>51.0</td></tr>
+                    <tr><td><strong>D2F-Dream</strong></td><td><strong>105 <span class="speedup">(10.1x)</span></strong></td><td><strong>2.3 <span class="speedup">(10.7x)</span></strong></td><td>240</td><td>55.2</td></tr>
+                </tbody>
+            </table>
+            
+            <h5>Demo Results of vLLM on HumanEval</h5>
+
+            We tested the performance of our implemented vLLM (initial version). While there was significant performance improvement, we observed an unexpected decrease in inference scores.
+
+            <table class="results-table">
+                <thead>
+                    <tr>
+                        <th>Model & Thresholds (Add, Act, Conf)</th>
+                        <th>TPS ↑</th>
+                        <th>Latency (s) ↓</th>
+                        <th>Gen. Length</th>
+                        <th>Score ↑</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Dream-Base (0.1, 0.95, 0.90)</td>
+                        <td>20.2 <span class="speedup">(1.0x)</span></td>
+                        <td>12.6 <span class="speedup">(1.0x)</span></td>
+                        <td>255</td>
+                        <td>54.3</td>
+                    </tr>
+                    <tr>
+                        <td><strong>D2F-Dream (0.1, 0.95, 0.90)</strong></td>
+                        <td><strong>73.2 <span class="speedup">(3.6x)</span></strong></td>
+                        <td><strong>3.1 <span class="speedup">(4.1x)</span></strong></td>
+                        <td>227</td>
+                        <td>54.3</td>
+                    </tr>
+                    <tr>
+                        <td><strong>D2F-Dream-vLLM (0.1, 0.95, 0.90)</strong></td>
+                        <td><strong>127.2 <span class="speedup">(6.3x)</span></strong></td>
+                        <td><strong>1.87 <span class="speedup">(6.74x)</span></strong></td>
+                        <td>238</td>
+                        <td>34.1</td>
+                    </tr>
+                    <tr>
+                        <td><strong>D2F-Dream-vLLM (0.05, 0.90, 0.95)</strong></td>
+                        <td><strong>131.7 <span class="speedup">(6.5x)</span></strong></td>
+                        <td><strong>1.78 <span class="speedup">(7.08x)</span></strong></td>
+                        <td>238</td>
+                        <td>40.2</td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="note-block">
+                <h5>Implementation Notes</h5>
+                <p>The current vLLM-based prototype <strong>does not yet</strong> include:</p>
+                <ul>
+                    <li>Specialized fused / hand-optimized operators for existing decoding paradigms</li>
+                    <li>CUDA Graph capture</li>
+                    <li>Multi-GPU distributed inference</li>
+                </ul>
+                <p>We leverage <strong>Flex Attention</strong> for convenience to obtain efficient inference. Despite saturating GPU memory, overall SM occupancy remains below optimal, indicating ample headroom for future engine-level optimization (e.g., kernel fusion, graph capture, improved scheduling, compute / communication overlap). Even in this preliminary state, the implementation already delivers substantial performance gains.</p>
+            </div>
+
+            <h4>Superior Efficiency Frontier</h4>
+            <p>Beyond raw numbers, D2F operates on a significantly better throughput-performance curve. The graph below shows that for any given performance level, D2F is drastically faster. For instance, on GSM8K, our model achieves <strong>3.1x higher throughput</strong> than LLaMA3 while also attaining a better score.</p>
+            
+            <figure>
+                <img src="assets/img/d2f/fig2_tradeoff.png" alt="Graph showing the throughput vs. performance trade-off for D2F and other models.">
+                <figcaption>
+                    <b>Figure 5.</b> The throughput-performance trade-off. D2F models (blue data points) establish a far more favorable efficiency curve. Unlike vanilla dLLMs, which see performance plummet at higher speeds, D2F maintains high scores while dramatically increasing throughput, outperforming AR baselines (stars) on both axes.
+                </figcaption>
+            </figure>
+
+            <h3>Conclusion</h3>
+            <p>Discrete Diffusion Forcing (D2F) represents a fundamental leap forward for diffusion-based language models. By creating a smart hybrid of autoregressive and diffusion principles, it overcomes the critical inference bottlenecks that have long held dLLMs back. For the first time, an open-source dLLM can not only match but significantly <strong>exceed the speed of highly optimized autoregressive models</strong>.</p>
+            <p>This breakthrough establishes dLLMs as a practical, high-performance alternative for a wide range of text generation tasks, paving the way for new applications and further research into efficient, parallel-first language modeling.</p>
+
+            <h3>Citation</h3>
+            <p>If you find our work useful, please consider citing our paper:</p>
+            <pre><code>@article{wang2025diffusion,
+              title={Diffusion llms can do faster-than-ar inference via discrete diffusion forcing},
+              author={Wang, Xu and Xu, Chenkai and Jin, Yijie and Jin, Jiachun and Zhang, Hao and Deng, Zhijie},
+              journal={arXiv preprint arXiv:2508.09192},
+              year={2025}
+            }</code></pre>
+        </article>
+    </div>
+
+</body>
+</html>
