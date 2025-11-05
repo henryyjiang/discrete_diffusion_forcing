@@ -304,8 +304,10 @@ def get_dataloader_by_config(tokenizer, config, global_config=None, max_length=1
     
     # Add reference to global config for data loading functions to access
     config._parent = global_config
-    
-    if training_mode == 'llada':
+
+    if training_mode == 'bisection_sampling_aware':
+        return get_llada_bs17k_dataloader(tokenizer, config, max_length)
+    elif training_mode == 'llada':
         return get_llada_bs17k_dataloader(tokenizer, config, max_length)
     elif training_mode == 'dream':
         return get_bs17k_dataloader(tokenizer, config, max_length)

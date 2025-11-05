@@ -8,7 +8,9 @@ def get_model_by_config(config):
     """Select different models based on config file"""
     training_mode = config.get('training_mode', 'dream')
     
-    if training_mode == 'llada':
+    if training_mode == 'bisection_sampling_aware':
+        return get_llada(config)  # Use llada for bisection sampling
+    elif training_mode == 'llada':
         return get_llada(config)
     elif training_mode == 'dream':
         return get_model(config)

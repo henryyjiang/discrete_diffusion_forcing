@@ -210,6 +210,6 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='config/bisection.yaml')
+    parser.add_argument('--config', type=str, default='config/llada.yaml')
     args = parser.parse_args()
     main(args)    
