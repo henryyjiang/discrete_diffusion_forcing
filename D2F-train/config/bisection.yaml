@@ -1,13 +1,14 @@
 # Training mode configuration
-training_mode: 'bisection_sampling_aware'  # 'llada' or 'dream'
+training_mode: 'bisection_sampling_aware' # 'llada' or 'dream'
 
 # Model and data path configuration
 paths:
   model: 'GSAI-ML/LLaDA-8B-Instruct'
-  experiment: 'ckpt_llada_instruct'
+  experiment: 'ckpt_llada_instruct_gt_threshold_sampling_1.2'
   data:
     bs: 'Lansechen/bs17k_collection_filtered_hard_maxlength600'
     bs_easy: 'Lansechen/bs17k_collection_filtered_easy_maxlength600'
+    numina: 'AI-MO/NuminaMath-CoT'
 
 denoiser:
   encoder:
@@ -18,7 +19,7 @@ denoiser:
     wiinit: true
     name: 'eagle_rope'
     num_blocks: 1
-    seq_len: &seq_len 256
+    seq_len: &seq_len 1024
     input_dim: 3584
     hidden_dim: &dim 3584
     vocab_size: 152064
@@ -29,7 +30,7 @@ denoiser:
 
 train:
   # Will use paths.experiment path
-  decoder_resume_path:
+  decoder_resume_path: D2F-llada-base/adapter_config.safetensors
   head_resume_path:
   skipped_keys:
   global_step:
@@ -38,12 +39,12 @@ train:
   output_dir: 'ddt_test'
   logging_dir: 'logs'
   mixed_precision: 'fp16'
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 5
   report_to: 'wandb'
-  block_size: 16
+  block_size: 32
   
   lr: 1e-5
-  num_iters: 50000
+  num_iters: 20000
   eval_every: 100000
   save_every: 1000
 
@@ -56,4 +57,5 @@ train:
 data:
   name: 'bs17k' #['numinamath', 'bs17k']
   batch_size: 1
+  accumulation_steps: 8
   max_length: *seq_len
