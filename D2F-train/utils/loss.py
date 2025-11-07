@@ -14,7 +14,8 @@ def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size
     
     # Create a copy for masking
     masked_input = input_ids.clone()
-    masked_indices_list = []
+    masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
+    p_mask = torch.ones_like(input_ids, dtype=torch.float32)
     
     for batch_idx in range(B):
         prompt_len = prompt_lengths[batch_idx].item()
@@ -35,59 +36,34 @@ def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size
             
             # Sample a random bisection iteration j from [0, k-1]
             if k > 0:
-                j = torch.randint(0, k, (1,)).item()
+                j = torch.randint(0, k, (1,), device=device).item()
             else:
                 j = 0
             
             # Create mask: exclude positions that are NOT multiples of 2^j
             step = 1 << j  # 2^j
             
+            # Compute masking probability for this block
+            if k > 0:
+                mask_prob = sum(1 for j_test in range(k) 
+                              if step != (1 << j_test)) / k
+            else:
+                mask_prob = 1.0
+            
             for pos in range(l, r):
                 relative_pos = pos - l
                 # If position is NOT a multiple of 2^j, mask it
                 if relative_pos % step != 0:
-                    masked_input[batch_idx, pos] = mask_id
-                    masked_indices_list.append((batch_idx, pos))
+                    # Ensure we don't go out of bounds
+                    if pos < L:
+                        masked_input[batch_idx, pos] = mask_id
+                        masked_indices[batch_idx, pos] = True
+                        p_mask[batch_idx, pos] = mask_prob if mask_prob > 0 else 1.0
             
             l = r
     
-    # Convert masked indices to boolean mask
-    masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
-    for batch_idx, pos in masked_indices_list:
-        masked_indices[batch_idx, pos] = True
-    
-    # Compute masking probability for each position (for loss weighting)
-    p_mask = torch.ones_like(input_ids, dtype=torch.float32)
-    for batch_idx in range(B):
-        prompt_len = prompt_lengths[batch_idx].item()
-        l = prompt_len
-        
-        while l < L:
-            r = min(l + block_size, L)
-            block_len = r - l
-            
-            if block_len == 0:
-                break
-            
-            k = 0
-            while (1 << k) < block_len:
-                k += 1
-            
-            # For each position, compute probability of being masked
-            for pos in range(l, r):
-                relative_pos = pos - l
-                # Count how many j values would mask this position
-                num_masked = 0
-                total_j = max(1, k)
-                
-                for j_test in range(k):
-                    step = 1 << j_test
-                    if relative_pos % step != 0:
-                        num_masked += 1
-                
-                p_mask[batch_idx, pos] = num_masked / total_j if total_j > 0 else 1.0
-            
-            l = r
+    # Ensure p_mask doesn't have zeros (would cause division by zero)
+    p_mask = torch.clamp(p_mask, min=1e-8)
     
     return masked_input, masked_indices, p_mask
 
@@ -108,6 +84,9 @@ def compute_bisection_sampling_aware_loss(
     """
     Compute loss using bisection sampling-aware training strategy.
     """
+    # Use LLaDA's mask_id
+    mask_id = 126336
+    
     B, L = input_ids.shape
     
     # Apply bisection sampling-aware masking
@@ -126,28 +105,28 @@ def compute_bisection_sampling_aware_loss(
     
     noisy_batch = noisy_batch.to(denoiser.device)
     
-    # Build bidirectional attention mask
-    attention_mask = build_custom_float_attention_mask(
-        noisy_batch, question_length, block_size, device=noisy_batch.device
+    # For bidirectional attention, just pass None (full attention)
+    # Or use zeros for attention_bias (no masking)
+    attention_mask = torch.zeros(
+        [B, 1, L, L], 
+        dtype=torch.float16, 
+        device=denoiser.device
     )
-    attention_mask = attention_mask.to(torch.float16)
     
-    # Forward pass
-    logits = denoiser(noisy_batch, attention_mask=attention_mask).logits
-    logits = shift_logits(logits)
+    # Forward pass - use attention_bias for LLaDA model
+    logits = denoiser(noisy_batch, attention_bias=attention_mask).logits
     
     if self_align:
         with torch.no_grad():
             with denoiser.disable_adapter():
                 ref_logits = denoiser(
                     noisy_batch,
-                    attention_mask=torch.zeros(
-                        [1, 1, noisy_batch.shape[1], noisy_batch.shape[1]],
+                    attention_bias=torch.zeros(
+                        [B, 1, L, L],
                         dtype=torch.float16,
                         device=denoiser.device
                     )
                 ).logits
-                ref_logits = shift_logits(ref_logits)
                 ref_logits = torch.nn.functional.softmax(ref_logits, dim=-1)
         
         token_loss = F.cross_entropy(
@@ -167,7 +146,6 @@ def compute_bisection_sampling_aware_loss(
     }
     
     return losses
-
 
 def compute_loss_by_config(
     input_ids,
@@ -327,31 +305,47 @@ def compute_llada_loss(
     return losses 
 
 
+# def build_custom_float_attention_mask(input_ids, prompt_length, block_size, device=None):
+#     """Bidirectional attention mask with block structure."""
+#     B, seq_len = input_ids.shape
+#     attn_mask = torch.full((B, 1, seq_len, seq_len), float('-inf'), dtype=torch.float32, device=device)
+    
+#     for i in range(B):
+#         # Prompt: bidirectional attention
+#         attn_mask[i, :, :, :prompt_length[i]] = 0.0
+        
+#         # Block division
+#         num_blocks = (seq_len - prompt_length[i] + block_size - 1) // block_size
+        
+#         for b in range(num_blocks):
+#             block_start = prompt_length[i] + b * block_size
+#             block_end = min(block_start + block_size, seq_len)
+            
+#             # Within-block bidirectional attention
+#             attn_mask[i, :, block_start:block_end, block_start:block_end] = 0.0
+            
+#             # Cross-block bidirectional attention
+#             for other_b in range(num_blocks):
+#                 if other_b != b:
+#                     other_start = prompt_length[i] + other_b * block_size
+#                     other_end = min(other_start + block_size, seq_len)
+#                     attn_mask[i, :, block_start:block_end, other_start:other_end] = 0.0
+    
+#     return attn_mask
+
 def build_custom_float_attention_mask(input_ids, prompt_length, block_size, device=None):
-    """Bidirectional attention mask with block structure."""
+    """Bidirectional attention mask with block structure for LLaDA."""
     B, seq_len = input_ids.shape
-    attn_mask = torch.full((B, 1, seq_len, seq_len), float('-inf'), dtype=torch.float32, device=device)
+    
+    # LLaDA expects shape [B, 1, 1, seq_len] or [B, 1, seq_len, seq_len]
+    # But the error suggests we need to check the exact format
+    # Initialize to zeros (allow attention everywhere for bidirectional)
+    attn_mask = torch.zeros((B, 1, seq_len, seq_len), dtype=torch.float32, device=device)
     
     for i in range(B):
-        # Prompt: bidirectional attention
-        attn_mask[i, :, :, :prompt_length[i]] = 0.0
-        
-        # Block division
-        num_blocks = (seq_len - prompt_length[i] + block_size - 1) // block_size
-        
-        for b in range(num_blocks):
-            block_start = prompt_length[i] + b * block_size
-            block_end = min(block_start + block_size, seq_len)
-            
-            # Within-block bidirectional attention
-            attn_mask[i, :, block_start:block_end, block_start:block_end] = 0.0
-            
-            # Cross-block bidirectional attention
-            for other_b in range(num_blocks):
-                if other_b != b:
-                    other_start = prompt_length[i] + other_b * block_size
-                    other_end = min(other_start + block_size, seq_len)
-                    attn_mask[i, :, block_start:block_end, other_start:other_end] = 0.0
+        # For bidirectional within blocks, we actually want all zeros (full attention)
+        # The blocking structure is just for the masking pattern, not attention restriction
+        pass
     
     return attn_mask
 
