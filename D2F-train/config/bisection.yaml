@@ -30,7 +30,7 @@ denoiser:
 
 train:
   # Will use paths.experiment path
-  decoder_resume_path: D2F-llada-base/adapter_config.safetensors
+  decoder_resume_path: 
   head_resume_path:
   skipped_keys:
   global_step:
@@ -44,8 +44,8 @@ train:
   block_size: 32
   
   lr: 1e-5
-  num_iters: 20000
-  eval_every: 100000
+  num_iters: 5000
+  eval_every: 500
   save_every: 1000
 
   enable_shift: true

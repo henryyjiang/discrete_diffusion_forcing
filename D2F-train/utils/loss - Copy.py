@@ -2,24 +2,197 @@ import torch
 from utils.util import forward_process_length, shift_logits,forward_process
 import torch.nn.functional as F
 
+def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size, eos_id):
+    """
+    Apply bisection sampling-aware masking strategy.
+    
+    For each block, randomly sample a bisection iteration level j,
+    then mask all positions that are NOT multiples of 2^j within that block.
+    """
+    B, L = input_ids.shape
+    device = input_ids.device
+    
+    # Create a copy for masking
+    masked_input = input_ids.clone()
+    masked_indices_list = []
+    
+    for batch_idx in range(B):
+        prompt_len = prompt_lengths[batch_idx].item()
+        
+        # Process each block
+        l = prompt_len
+        while l < L:
+            r = min(l + block_size, L)
+            block_len = r - l
+            
+            if block_len == 0:
+                break
+            
+            # Find k such that 2^k >= block_len
+            k = 0
+            while (1 << k) < block_len:
+                k += 1
+            
+            # Sample a random bisection iteration j from [0, k-1]
+            if k > 0:
+                j = torch.randint(0, k, (1,)).item()
+            else:
+                j = 0
+            
+            # Create mask: exclude positions that are NOT multiples of 2^j
+            step = 1 << j  # 2^j
+            
+            for pos in range(l, r):
+                relative_pos = pos - l
+                # If position is NOT a multiple of 2^j, mask it
+                if relative_pos % step != 0:
+                    masked_input[batch_idx, pos] = mask_id
+                    masked_indices_list.append((batch_idx, pos))
+            
+            l = r
+    
+    # Convert masked indices to boolean mask
+    masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
+    for batch_idx, pos in masked_indices_list:
+        masked_indices[batch_idx, pos] = True
+    
+    # Compute masking probability for each position (for loss weighting)
+    p_mask = torch.ones_like(input_ids, dtype=torch.float32)
+    for batch_idx in range(B):
+        prompt_len = prompt_lengths[batch_idx].item()
+        l = prompt_len
+        
+        while l < L:
+            r = min(l + block_size, L)
+            block_len = r - l
+            
+            if block_len == 0:
+                break
+            
+            k = 0
+            while (1 << k) < block_len:
+                k += 1
+            
+            # For each position, compute probability of being masked
+            for pos in range(l, r):
+                relative_pos = pos - l
+                # Count how many j values would mask this position
+                num_masked = 0
+                total_j = max(1, k)
+                
+                for j_test in range(k):
+                    step = 1 << j_test
+                    if relative_pos % step != 0:
+                        num_masked += 1
+                
+                p_mask[batch_idx, pos] = num_masked / total_j if total_j > 0 else 1.0
+            
+            l = r
+    
+    return masked_input, masked_indices, p_mask
+
+
+def compute_bisection_sampling_aware_loss(
+    input_ids,
+    denoiser,
+    question_length,
+    mask_id,
+    block_size,
+    enable_shift,
+    share_steps,
+    self_align,
+    feature_align,
+    self_step,
+    eos_id,
+):
+    """
+    Compute loss using bisection sampling-aware training strategy.
+    """
+    mask_id = 126336
+    B, L = input_ids.shape
+    
+    # Apply bisection sampling-aware masking
+    noisy_batch, masked_indices, p_mask = bisection_sampling_aware_mask(
+        input_ids, 
+        prompt_lengths=question_length, 
+        mask_id=mask_id, 
+        block_size=block_size,
+        eos_id=eos_id
+    )
+    
+    # Preserve prompt (don't mask it)
+    token_positions = torch.arange(L, device=noisy_batch.device).expand(B, L)
+    prompt_mask = (token_positions < question_length.unsqueeze(1))
+    noisy_batch[prompt_mask] = input_ids[prompt_mask]
+    
+    noisy_batch = noisy_batch.to(denoiser.device)
+    
+    # Build bidirectional attention mask
+    attention_mask = build_custom_float_attention_mask(
+        noisy_batch, question_length, block_size, device=noisy_batch.device
+    )
+    attention_mask = attention_mask.to(torch.float16)
+    
+    # Forward pass
+    logits = denoiser(noisy_batch, attention_mask=attention_mask).logits
+    logits = shift_logits(logits)
+    
+    if self_align:
+        with torch.no_grad():
+            with denoiser.disable_adapter():
+                ref_logits = denoiser(
+                    noisy_batch,
+                    attention_mask=torch.zeros(
+                        [1, 1, noisy_batch.shape[1], noisy_batch.shape[1]],
+                        dtype=torch.float16,
+                        device=denoiser.device
+                    )
+                ).logits
+                ref_logits = shift_logits(ref_logits)
+                ref_logits = torch.nn.functional.softmax(ref_logits, dim=-1)
+        
+        token_loss = F.cross_entropy(
+            logits[masked_indices], 
+            ref_logits[masked_indices], 
+            reduction='none'
+        ) / p_mask[masked_indices]
+    else:
+        token_loss = F.cross_entropy(
+            logits[masked_indices], 
+            input_ids[masked_indices], 
+            reduction='none'
+        ) / p_mask[masked_indices]
+    
+    losses = {
+        'loss': token_loss.mean(),
+    }
+    
+    return losses
+
+
 def compute_loss_by_config(
-        input_ids,
-        denoiser,
-        question_length,
-        mask_id,
-        block_size,
-        enable_shift,
-        share_steps,
-        self_align,
-        feature_align,
-        self_step,
-        eos_id,
-        config
+    input_ids,
+    denoiser,
+    question_length,
+    mask_id,
+    block_size,
+    enable_shift,
+    share_steps,
+    self_align,
+    feature_align,
+    self_step,
+    eos_id,
+    config
 ):
     """Select different loss functions based on config file"""
     training_mode = config.get('training_mode', 'dream')
     
-    if training_mode == 'llada':
+    if training_mode == 'bisection_sampling_aware':
+        return compute_bisection_sampling_aware_loss(
+            input_ids, denoiser, question_length, mask_id, block_size,
+            enable_shift, share_steps, self_align, feature_align, self_step, eos_id
+        )
+    elif training_mode == 'llada':
         return compute_llada_loss(
             input_ids, denoiser, question_length, mask_id, block_size,
             enable_shift, share_steps, self_align, feature_align, self_step, eos_id
@@ -156,37 +329,38 @@ def compute_llada_loss(
 
 
 def build_custom_float_attention_mask(input_ids, prompt_length, block_size, device=None):
-    B,seq_len= input_ids.shape
-    # 初始化为全 -inf
-    attn_mask = torch.full((B,1,seq_len, seq_len), float('-inf'), dtype=torch.float32, device=device)
-    # 1. Prompt部分：每个token可以注意整个prompt
+    """Bidirectional attention mask with block structure."""
+    B, seq_len = input_ids.shape
+    attn_mask = torch.full((B, 1, seq_len, seq_len), float('-inf'), dtype=torch.float32, device=device)
+    
     for i in range(B):
-        attn_mask[i,:,:,:prompt_length[i]] = 0.0  # 允许所有 token 看 prompt
-
-        # 2. 块划分：从 prompt_length 开始划分 block
+        # Prompt: bidirectional attention
+        attn_mask[i, :, :, :prompt_length[i]] = 0.0
+        
+        # Block division
         num_blocks = (seq_len - prompt_length[i] + block_size - 1) // block_size
-
+        
         for b in range(num_blocks):
             block_start = prompt_length[i] + b * block_size
-            # print(block_start,block_size,seq_len)
             block_end = min(block_start + block_size, seq_len)
-
-            # 块内全注意
-            attn_mask[i,:,block_start:block_end, block_start:block_end] = 0.0
-
-            # 块之间因果注意（只能看前面块）
-            # for prev_b in range(b):
-            #     prev_start = prompt_length[i] + prev_b * block_size
-            #     prev_end = min(prev_start + block_size, seq_len)
+            
+            # Within-block bidirectional attention
+            attn_mask[i, :, block_start:block_end, block_start:block_end] = 0.0
+            
+            # Cross-block bidirectional attention
             for other_b in range(num_blocks):
-                if other_b != b:  # Skip current block (already handled above)
+                if other_b != b:
                     other_start = prompt_length[i] + other_b * block_size
                     other_end = min(other_start + block_size, seq_len)
+                    attn_mask[i, :, block_start:block_end, other_start:other_end] = 0.0
+    
+    return attn_mask
 
-                # 当前块可以看前面块
-                attn_mask[i,:,block_start:block_end, prev_start:prev_end] = 0.0
 
-    return attn_mask  # [seq_len, seq_len], float, 0.0 for allowed, -inf for disallowed
+def shift_logits(logits):
+    """Shift logits for next-token prediction."""
+    return logits[:, :-1, :]
+    
 if __name__ == "__main__":
     seq_len = 10
     input_ids = torch.randint(0, 100, (2, seq_len))  # 示例输入
