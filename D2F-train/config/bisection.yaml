@@ -44,8 +44,8 @@ train:
   block_size: 32
   
   lr: 1e-5
-  num_iters: 5000
-  eval_every: 500
+  num_iters: 10000
+  eval_every: 50000
   save_every: 1000
 
   enable_shift: true
