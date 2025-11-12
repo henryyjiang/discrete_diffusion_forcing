@@ -337,12 +337,15 @@ def build_custom_float_attention_mask(input_ids, prompt_length, block_size, devi
     """Bidirectional attention mask with block structure for LLaDA."""
     B, seq_len = input_ids.shape
     
+
     # Initialize to zeros (allow attention everywhere for bidirectional)
     attn_mask = torch.zeros((B, 1, seq_len, seq_len), dtype=torch.float32, device=device)
     
     for i in range(B):
         # For bidirectional within blocks, we actually want all zeros (full attention)
-\        pass
+
+        # The blocking structure is just for the masking pattern, not attention restriction
+        pass
     
     return attn_mask
 
