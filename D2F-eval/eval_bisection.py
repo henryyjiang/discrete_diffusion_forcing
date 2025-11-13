@@ -46,16 +46,45 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 def create_bisection_block_attention_mask(prompt_length, max_length, block_size, device=None, dtype=None):
+    """
+    Creates a complete bidirectional attention mask for bisection sampling.
+    All tokens can see all other tokens (full bidirectional attention).
+    
+    Args:
+        prompt_length: Length of the prompt (first irregular block)
+        max_length: Maximum total sequence length
+        block_size: Size of each regular block
+        device: Device to create tensor on
+        dtype: Data type for the attention mask
+        
+    Returns:
+        attention_mask: Tensor of shape [1, 1, max_length, max_length] with all zeros (full attention)
+    """
     if dtype is None:
         dtype = torch.bfloat16
     
+    # For bidirectional attention, return all zeros (no masking)
     attention_mask = torch.zeros((1, 1, max_length, max_length), device=device, dtype=dtype)
     
     return attention_mask
 
 def extract_attention_mask(full_mask, start_pos, input_length, cache_length):
+    """
+    Extract the relevant portion of attention mask for current forward pass.
+    For bisection sampling, this just returns zeros (full attention).
+    
+    Args:
+        full_mask: Complete attention mask [1, 1, max_length, max_length]
+        start_pos: Starting position in the full sequence
+        input_length: Length of current input sequence
+        cache_length: Length of cached sequence
+        
+    Returns:
+        attention_mask: Extracted mask [1, 1, input_length, cache_length + input_length]
+    """
     total_length = cache_length + input_length
     
+    # For bidirectional attention, return all zeros
     extracted_mask = torch.zeros((1, 1, input_length, total_length), 
                                  device=full_mask.device, dtype=full_mask.dtype)
     
@@ -141,14 +170,14 @@ class DreamLoRABisection(TemplateLM):
         device: Optional[str] = "cuda",
         dtype: Optional[Union[str, torch.dtype]] = "auto",
         max_new_tokens: Optional[int] = 128,
-        max_length: Optional[int] = 4096,
+        max_length: Optional[int] = 1024,
         add_bos_token: Optional[bool] = False,
         nll_type: Optional[str] = "mc",
         log_type: Optional[str] = "ftb",
-        mc_num: Optional[int] = 128,
+        mc_num: Optional[int] = 32,
         classifier_free_guidance: Optional[float] = 1.0,
         sampling_eps: Optional[float] = 1e-3,
-        diffusion_steps: Optional[int] = 128,
+        diffusion_steps: Optional[int] = 32,
         trust_remote_code: Optional[bool] = True,
         parallelize: Optional[bool] = False,
         autogptq: Optional[Union[bool, str]] = False,
@@ -160,7 +189,7 @@ class DreamLoRABisection(TemplateLM):
         escape_until: Optional[bool] = False,
         block_size: Optional[int] = 4,
         mask_token_id: Optional[int] = 126336,
-        skip_threshold: Optional[float] = 1.0,
+        skip_threshold: Optional[float] = 0.9,
         sampling_strategy: Optional[str] = "default",
         save_dir: Optional[str] = None,
         show_speed: Optional[bool] = True,
@@ -473,12 +502,14 @@ class DreamLoRABisection(TemplateLM):
         with torch.inference_mode():
             x_t = prompt.to(self.device)
             
+            # Track block states with bisection iteration levels
+            # Each block has a 'current_j' indicating current bisection level
             block_states = {
                 0: {  # Prompt block
                     'start_pos': 0,
                     'end_pos': prompt.shape[1],
                     'state': 'completed',
-                    'current_j': None,
+                    'current_j': None,  # Prompt doesn't use bisection
                 },
             }
             
@@ -488,7 +519,7 @@ class DreamLoRABisection(TemplateLM):
             eos_detected = False
             
             # Add initial blocks
-            num_initial_blocks = min((self.max_new_tokens // block_size), 4) 
+            num_initial_blocks = min((self.max_new_tokens // block_size), 4)  # Start with a few blocks
             for b in range(num_initial_blocks):
                 new_block_id = len(block_states)
                 new_start_pos = x_t.shape[1]
@@ -505,17 +536,22 @@ class DreamLoRABisection(TemplateLM):
                     'end_pos': new_start_pos + block_size,
                     'state': 'active',
                     'current_j': k-1,
-                    'k': k,
+                    'k': k,  # Maximum bisection level
                 }
             
             while True:
                 step += 1
                 
+                # Check termination
+                mask_index = (x_t == mask_id)
+                if mask_index.sum() == 0:
+                    break
+                
                 # Check if we should add more blocks
                 if len(block_states) - 1 < (self.max_new_tokens // block_size) and not eos_detected:
                     # Check if the last block has progressed enough
                     last_block_id = max(block_states.keys())
-                    if block_states[last_block_id]['state'] == 'completed':
+                    if block_states[last_block_id]['state'] in ['to_cache', 'cached']:
                         # Add a new block
                         new_block_id = len(block_states)
                         new_start_pos = x_t.shape[1]
@@ -533,10 +569,7 @@ class DreamLoRABisection(TemplateLM):
                             'current_j':k-1,
                             'k': k,
                         }
-                
-                mask_index = (x_t == mask_id)
-                if mask_index.sum() == 0:
-                    break
+               
                 
                 # Determine blocks to cache (completed blocks)
                 blocks_to_cache = [bid for bid, state in block_states.items() 
@@ -597,6 +630,7 @@ class DreamLoRABisection(TemplateLM):
                 
                 logits = outputs.logits
                 
+                # Update cache if needed
                 if update_kvcache > 0:
                     past_key_values = outputs.past_key_values
                     for block_id in blocks_to_cache:
@@ -624,7 +658,7 @@ class DreamLoRABisection(TemplateLM):
                     # Only process positions dictated by bisection mask
                     for i in range(block_length):
                         abs_pos = block_start + i
-                        if not bisection_mask[i]: 
+                        if not bisection_mask[i]:  # This position should be unmasked in iteration j
                             block_mask_index[:, abs_pos] = False
                     
                     if block_mask_index.sum() == 0:
@@ -689,7 +723,7 @@ class DreamLoRABisection(TemplateLM):
                 if update_kvcache > 0:
                     cache_length += update_kvcache
                 
-                if step > 10000:
+                if step > 250:
                     print(f"WARNING: Hit safety check at step {step}. Exiting generation loop.")
                     break
         
