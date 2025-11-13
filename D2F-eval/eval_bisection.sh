@@ -3,6 +3,8 @@
 # Bisection Sampling Evaluation Script
 # Simplified from the original - removes progressive decoding parameters
 
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
 tasks="gsm8k mbpp minerva_math"
 nshots="4 3 0"
 max_lengths="1024 1024 10224"  # Total sequence length including prompt
@@ -24,7 +26,7 @@ humaneval_dtypes="bfloat16"
 # Your models
 base_model="GSAI-ML/LLaDA-8B-Instruct"
 lora_models=(
-    "/D2F-train/ckpt_llada_instruct_gt_threshold_sampling_1.2/llada_ddt_maskteacher/ddt_test/Decoder-llada_ddt_maskteacher-10k"  # UPDATE THIS PATH
+    "../D2F-train/ckpt_llada_instruct_gt_threshold_sampling_1.2/llada_ddt_maskteacher/ddt_test/Decoder-llada_ddt_maskteacher-10k"  # UPDATE THIS PATH
 )
 
 # Parse arrays
@@ -95,11 +97,11 @@ for lora_model in "${lora_models[@]}"; do
         model_args="${model_args},add_bos_token=true"
         model_args="${model_args},mask_token_id=126336"  # LLaDA mask token
         
-        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch \
+        accelerate launch \
             --main_process_port 29520 \
             --num_processes 8 \
-            eval_llada_bisection.py \
-            --model llada-bisection \
+            eval_bisection.py \
+            --model bisection \
             --model_args "$model_args" \
             --tasks humaneval \
             --num_fewshot ${HUMANEVAL_NSHOTS_ARRAY[$i]} \
@@ -126,11 +128,11 @@ for lora_model in "${lora_models[@]}"; do
         model_args="${model_args},add_bos_token=true"
         model_args="${model_args},mask_token_id=126336"
         
-        CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch \
+        accelerate launch \
             --main_process_port 29520 \
             --num_processes 8 \
-            eval_llada_bisection.py \
-            --model llada-bisection \
+            eval_bisection.py \
+            --model bisection \
             --model_args "$model_args" \
             --tasks ${TASKS_ARRAY[$i]} \
             --limit ${LIMITS_ARRAY[$i]} \

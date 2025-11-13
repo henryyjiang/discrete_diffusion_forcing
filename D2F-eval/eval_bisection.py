@@ -164,8 +164,8 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
 class DreamLoRABisection(TemplateLM):
     def __init__(
         self,
-        pretrained: Union[str, transformers.PreTrainedModel],
-        lora_path: str,
+        base_model_name_or_path: Union[str, transformers.PreTrainedModel],
+        peft_model_name_or_path: str,
         batch_size: Optional[Union[int, str]] = 1,
         device: Optional[str] = "cuda",
         dtype: Optional[Union[str, torch.dtype]] = "auto",
@@ -198,7 +198,7 @@ class DreamLoRABisection(TemplateLM):
         super().__init__()
 
         assert isinstance(device, str)
-        assert isinstance(pretrained, str)
+        assert isinstance(base_model_name_or_path, str)
         assert isinstance(batch_size, (int, str))
 
         gpus = torch.cuda.device_count()
@@ -249,16 +249,16 @@ class DreamLoRABisection(TemplateLM):
         if isinstance(batch_size, str):
             self.batch_size_per_gpu = int(batch_size)
         
-        self.lora_path = lora_path
+        self.lora_path = peft_model_name_or_path
         self.block_size = block_size
         self.skip_threshold = skip_threshold
         self.sampling_strategy = sampling_strategy
         
         self.target_dtype = get_dtype(dtype)
         
-        self._create_model_and_tokenizer(pretrained, dtype, trust_remote_code)
+        self._create_model_and_tokenizer(base_model_name_or_path, dtype, trust_remote_code)
 
-        if isinstance(pretrained, str):
+        if isinstance(base_model_name_or_path, str):
             if gpus >= 1 or str(self.device) == "mps":
                 if not (parallelize or autogptq or hasattr(self, "accelerator")):
                     try:
