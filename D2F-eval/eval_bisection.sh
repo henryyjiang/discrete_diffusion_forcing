@@ -1,20 +1,16 @@
 #!/bin/bash
 
-# Bisection Sampling Evaluation Script
-# Simplified from the original - removes progressive decoding parameters
-
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 tasks="gsm8k mbpp minerva_math"
 nshots="4 3 0"
-max_lengths="1024 1024 10224"  # Total sequence length including prompt
+max_lengths="1024 1024 1024"  
 temperatures="0 0 0"
 limits="10000 10000 10000"
-block_sizes="32 32 32"  # Block size used during training
+block_sizes="32 32 32" 
 top_ps="0.95 0.95 0.95"
 dtypes="bfloat16 bfloat16 bfloat16"
 
-# HumanEval specific settings
 humaneval_nshots="0"
 humaneval_max_lengths="2048"
 humaneval_temperatures="0"
@@ -23,10 +19,9 @@ humaneval_block_sizes="128"
 humaneval_top_ps="0.95"
 humaneval_dtypes="bfloat16"
 
-# Your models
 base_model="GSAI-ML/LLaDA-8B-Instruct"
 lora_models=(
-    "../D2F-train/ckpt_llada_instruct_gt_threshold_sampling_1.2/llada_ddt_maskteacher/ddt_test/Decoder-llada_ddt_maskteacher-10k"  # UPDATE THIS PATH
+    "../D2F-train/ckpt_llada_instruct_gt_threshold_sampling_1.2/llada_ddt_maskteacher/ddt_test/Decoder-llada_ddt_maskteacher-10k"  
 )
 
 # Parse arrays
@@ -86,7 +81,6 @@ for lora_model in "${lora_models[@]}"; do
         echo "Running HumanEval evaluation $((i+1))/${humaneval_array_length} for $lora_model_name..."
         echo "Config: Shots=${HUMANEVAL_NSHOTS_ARRAY[$i]}, MaxLength=${HUMANEVAL_MAX_LENGTHS_ARRAY[$i]}, Temp=${HUMANEVAL_TEMP_ARRAY[$i]}, Block=${HUMANEVAL_BLOCK_SIZES_ARRAY[$i]}, TopP=${HUMANEVAL_TOP_PS_ARRAY[$i]}, Dtype=${HUMANEVAL_DTYPES_ARRAY[$i]}"
         
-        # Build model args for bisection
         model_args="base_model_name_or_path=${base_model}"
         model_args="${model_args},peft_model_name_or_path=${lora_model}"
         model_args="${model_args},max_length=${HUMANEVAL_MAX_LENGTHS_ARRAY[$i]}"
@@ -95,7 +89,7 @@ for lora_model in "${lora_models[@]}"; do
         model_args="${model_args},block_size=${HUMANEVAL_BLOCK_SIZES_ARRAY[$i]}"
         model_args="${model_args},dtype=${HUMANEVAL_DTYPES_ARRAY[$i]}"
         model_args="${model_args},add_bos_token=true"
-        model_args="${model_args},mask_token_id=126336"  # LLaDA mask token
+        model_args="${model_args},mask_token_id=126336"
         
         accelerate launch \
             --main_process_port 29520 \
@@ -117,7 +111,6 @@ for lora_model in "${lora_models[@]}"; do
         
         echo "Task: ${TASKS_ARRAY[$i]}, Shots: ${NSHOTS_ARRAY[$i]}, MaxLength: ${MAX_LENGTH_ARRAY[$i]}, Temp: ${TEMP_ARRAY[$i]}, Block: ${BLOCK_SIZES_ARRAY[$i]}, TopP: ${TOP_PS_ARRAY[$i]}, Dtype: ${DTYPES_ARRAY[$i]}"
         
-        # Build model args for bisection
         model_args="base_model_name_or_path=${base_model}"
         model_args="${model_args},peft_model_name_or_path=${lora_model}"
         model_args="${model_args},max_length=${MAX_LENGTH_ARRAY[$i]}"

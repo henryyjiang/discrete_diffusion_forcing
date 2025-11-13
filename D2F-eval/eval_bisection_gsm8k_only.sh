@@ -1,26 +1,23 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0
 
-# GSM8K only - optimized for speed
 tasks="gsm8k"
 nshots="4"
-max_lengths="1024"  # Total sequence length including prompt
+max_lengths="1024"
 temperatures="0"
-limits="1519"  # Full GSM8K test set
+limits="1519"
 block_sizes="32"
 top_ps="0.95"
 dtypes="bfloat16"
-mc_nums="32"  # Monte Carlo samples for loglikelihood (32 for speed, 128 for quality)
-diffusion_steps="32"  # For generation (32 for speed, 128 for quality)
+mc_nums="32"
+diffusion_steps="32"
 
-# Base model and LoRA path
 base_model="GSAI-ML/LLaDA-8B-Instruct"
 lora_models=(
     "../D2F-train/ckpt_llada_instruct_gt_threshold_sampling_1.2/llada_ddt_maskteacher/ddt_test/Decoder-llada_ddt_maskteacher-10k"
 )
 
-# Parse arrays
 read -ra TASKS_ARRAY <<< "$tasks"
 read -ra NSHOTS_ARRAY <<< "$nshots"
 read -ra MAX_LENGTH_ARRAY <<< "$max_lengths"
@@ -32,7 +29,6 @@ read -ra DTYPES_ARRAY <<< "$dtypes"
 read -ra MC_NUMS_ARRAY <<< "$mc_nums"
 read -ra DIFFUSION_STEPS_ARRAY <<< "$diffusion_steps"
 
-# Validation
 array_length=${#TASKS_ARRAY[@]}
 if [[ ${#NSHOTS_ARRAY[@]} -ne $array_length ]] || \
    [[ ${#MAX_LENGTH_ARRAY[@]} -ne $array_length ]] || \
@@ -59,7 +55,6 @@ for lora_model in "${lora_models[@]}"; do
         echo "Running evaluation for ${TASKS_ARRAY[$i]}"
         echo "Config: Shots=${NSHOTS_ARRAY[$i]}, MaxLength=${MAX_LENGTH_ARRAY[$i]}, Temp=${TEMP_ARRAY[$i]}, Block=${BLOCK_SIZES_ARRAY[$i]}, TopP=${TOP_PS_ARRAY[$i]}, MC_Num=${MC_NUMS_ARRAY[$i]}, DiffSteps=${DIFFUSION_STEPS_ARRAY[$i]}, Dtype=${DTYPES_ARRAY[$i]}"
         
-        # Build model args for bisection
         model_args="base_model_name_or_path=${base_model}"
         model_args="${model_args},peft_model_name_or_path=${lora_model}"
         model_args="${model_args},max_length=${MAX_LENGTH_ARRAY[$i]}"
@@ -74,7 +69,7 @@ for lora_model in "${lora_models[@]}"; do
         
         accelerate launch \
             --main_process_port 29520 \
-            --num_processes 8 \
+            --num_processes 1 \
             eval_bisection.py \
             --model bisection \
             --model_args "$model_args" \
