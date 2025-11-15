@@ -5,7 +5,7 @@ export CUDA_VISIBLE_DEVICES=0
 tasks="gsm8k"
 nshots="4"
 max_lengths="1024"
-temperatures="0"
+temperatures="0.9"
 limits="1519"
 block_sizes="32"
 top_ps="0.95"
@@ -15,7 +15,7 @@ diffusion_steps="32"
 
 base_model="GSAI-ML/LLaDA-8B-Instruct"
 lora_models=(
-    "../D2F-train/ckpt_llada_instruct_gt_threshold_sampling_1.2/llada_ddt_maskteacher/ddt_test/Decoder-llada_ddt_maskteacher-10k"
+    "../D2F-train/ckpt_llada_instruct_gt_threshold_sampling_1.2/llada_ddt_maskteacher/ddt_test/Decoder-llada_ddt_maskteacher-ver2"
 )
 
 read -ra TASKS_ARRAY <<< "$tasks"

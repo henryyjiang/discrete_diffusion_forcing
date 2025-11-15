@@ -40,6 +40,34 @@ def get_accelerator(config, global_config):
 
     return accelerator, output_dir
 
+def top_p_sample(logits, top_p=0.9, temperature=1.0):
+    logits = logits / temperature
+
+    # sort
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+
+    # compute cumulative probs
+    sorted_probs = torch.softmax(sorted_logits, dim=-1)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    # mask tokens outside top_p
+    cutoff = cumulative_probs > top_p
+    # shift mask right so the first token above threshold is kept
+    cutoff[..., 1:] = cutoff[..., :-1].clone()
+    cutoff[..., 0] = False
+
+    sorted_logits[cutoff] = -float("inf")
+
+    # sample from the truncated distribution
+    probs = torch.softmax(sorted_logits, dim=-1)
+    next_token = torch.multinomial(probs, 1)
+
+    # map back to original indices
+    next_token = sorted_indices.gather(-1, next_token)
+    return next_token
+
+
+
 def main(args):
     config = OmegaConf.load(args.config)
     accelerator, output_dir = get_accelerator(config.train, config)
@@ -69,7 +97,7 @@ def main(args):
         params_to_learn,
         lr           = config.train.lr,
         betas        = (0.9, 0.95),
-        weight_decay = 5e-2,
+        weight_decay = 1e-3,
         eps          = 1e-8,
     )
     
@@ -159,37 +187,33 @@ def main(args):
                 ).input_ids
                 prompt = prompt.to(accelerator.device)
 
-                mask_id = 151666
+                mask_id = 151666       # unused in AR generation
                 gen_len = 512 - prompt.shape[1]
                 temperature = 0.2
                 top_p = 0.95
 
-                x_t = torch.cat([prompt, torch.tensor([[mask_id]*gen_len]).to(accelerator.device)], dim=1)
+                # Start only with the prompt tokens
+                x_t = prompt.clone()
+
                 with torch.inference_mode():
                     for i in range(gen_len):
-                        mask_index = (x_t == mask_id)
-                        if i % 2 == 0:
-                            z_t = denoiser.module.encoder(x_t, output_hidden_states=True).hidden_states[-1]
-                            hidden_state = denoiser.module.decoder(x_t, z_t)
-                            logits = denoiser.module.encoder.lm_head(hidden_state)
-                        else:
-                            hidden_state = denoiser.module.decoder(x_t, z_t)
-                            logits = denoiser.module.lm_head(hidden_state)
+                        logits = denoiser(x_t, attention_bias=None).logits
+                        logits = logits[:, -1, :]  # last token
 
-                        if config.train.enable_shift:
-                            logits = shift_logits(logits)
+                        # temperature sampling
+                        logits = logits / temperature
+                        probs = torch.softmax(logits, dim=-1)
 
-                        mask_logits = logits[mask_index]
-                        confidence, x0 = sample_tokens(mask_logits, temperature, top_p=top_p, top_k=None, neg_entropy=True)
+                        # top-p (nucleus) sampling
+                        next_token = top_p_sample(logits, top_p=top_p, temperature=temperature)
 
-                        number_transfer_tokens = 1
-                        _, transfer_index = torch.topk(confidence, number_transfer_tokens)
-                        x0_ = torch.zeros_like(x0, device=accelerator.device, dtype=torch.long) + mask_id
-                        x0_[transfer_index] = x0[transfer_index].clone()
-                        x_t[mask_index] = x0_
+
+                        # append next token
+                        x_t = torch.cat([x_t, next_token], dim=1)
 
                 answer = tokenizer.batch_decode(x_t[:, prompt.shape[1]:], skip_special_tokens=True)[0]
                 print(answer)
+
 
             accelerator.wait_for_everyone()
 

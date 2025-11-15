@@ -113,6 +113,7 @@ def top_p_logits(logits, top_p=None):
     sorted_logits, sorted_indices = torch.sort(logits, descending=True)
     cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
     sorted_indices_to_remove = cumulative_probs > top_p
+    # Shift the indices to the right to keep the first token above the threshold
     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
     sorted_indices_to_remove[..., 0] = 0
 
@@ -122,7 +123,8 @@ def top_p_logits(logits, top_p=None):
     return logits
 
 def top_k_logits(logits, top_k=None):
-    top_k = min(top_k, logits.size(-1))
+    top_k = min(top_k, logits.size(-1))  # Safety check
+    # Remove all tokens with a probability less than the last token of the top-k
     indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
     logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
     return logits
@@ -136,6 +138,18 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
         logits = top_k_logits(logits, top_k)
     probs = torch.softmax(logits, dim=-1)
 
+    special_tokens = [126081, 198, 268, 220]  # EOS, newline, and other common specials
+    for token_id in special_tokens:
+        if token_id < logits.shape[-1]:  # Safety check
+            logits[:, token_id] = float('-inf')
+    
+    if top_p is not None and top_p < 1:
+        logits = top_p_logits(logits, top_p)
+    if top_k is not None:
+        logits = top_k_logits(logits, top_k)
+    
+    probs = torch.softmax(logits, dim=-1)
+
     if temperature > 0:
         try:
             x0 = dists.Categorical(probs=probs).sample()
@@ -145,12 +159,15 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
     else:
         initial_confidence, x0 = probs.max(dim=-1)
     
+    # Save initial confidence
     confidence = initial_confidence.clone()
     
     if margin_confidence:
         sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
+        # Extract top1 and top2 probabilities
         top1_probs = sorted_probs[:, 0] 
         top2_probs = sorted_probs[:, 1] 
+        # Calculate confidence as top1 - top2
         confidence = top1_probs - top2_probs 
     
     if neg_entropy:
@@ -159,6 +176,7 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
         confidence = torch.sum(probs * log_probs, dim=-1)
     
     return confidence, x0, initial_confidence
+
 
 @register_model("bisection")
 class DreamLoRABisection(TemplateLM):
@@ -189,7 +207,7 @@ class DreamLoRABisection(TemplateLM):
         escape_until: Optional[bool] = False,
         block_size: Optional[int] = 4,
         mask_token_id: Optional[int] = 126336,
-        skip_threshold: Optional[float] = 0.5,
+        skip_threshold: Optional[float] = 0,
         sampling_strategy: Optional[str] = "default",
         save_dir: Optional[str] = None,
         show_speed: Optional[bool] = True,
@@ -421,7 +439,22 @@ class DreamLoRABisection(TemplateLM):
             ]
         self.tokenizer.padding_side = old_padding_side
 
-        return encoding["input_ids"].to(self.device), encoding["attention_mask"].to(self.device)
+        # ADD ERROR HANDLING HERE:
+        try:
+            input_ids = encoding["input_ids"].to(self.device)
+            attention_mask = encoding["attention_mask"].to(self.device)
+            return input_ids, attention_mask
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                print(f"⚠️  CUDA error moving tensors to device: {e}")
+                print(f"⚠️  Input text: {strings[0][:100]}")
+                # Return empty tensors as fallback
+                return (
+                    torch.zeros((1, 1), dtype=torch.long, device=self.device),
+                    torch.zeros((1, 1), dtype=torch.long, device=self.device)
+                )
+            else:
+                raise
 
     def tok_decode(self, tokens, skip_special_tokens=True):
         return self.tokenizer.decode(tokens, skip_special_tokens=skip_special_tokens)
@@ -530,16 +563,12 @@ class DreamLoRABisection(TemplateLM):
                 k = 0
                 while (1 << k) < block_length:
                     k += 1
-
-                random_j = torch.randint(0, k, (1,), device=self.device).item() if k > 0 else 0
-
                 
                 block_states[new_block_id] = {
                     'start_pos': new_start_pos,
                     'end_pos': new_start_pos + block_size,
                     'state': 'active',
-                    # 'current_j': k-1,
-                    'current_j': random_j,
+                    'current_j': k-1,
                     'k': k,  # Maximum bisection level
                 }
             
@@ -549,6 +578,7 @@ class DreamLoRABisection(TemplateLM):
                 # Check termination
                 mask_index = (x_t == mask_id)
                 if mask_index.sum() == 0:
+                    print("no more masked!")
                     break
                
                 if len(block_states) - 1 < (self.max_new_tokens // block_size) and not eos_detected:
@@ -557,7 +587,6 @@ class DreamLoRABisection(TemplateLM):
                     
                     # Check if last block is making good progress (at least halfway through iterations)
                     if last_block['state'] in ['to_cache', 'cached']:
-                        # Fully complete - definitely add new block
                         should_add = True
                     else:
                         should_add = False
@@ -615,14 +644,15 @@ class DreamLoRABisection(TemplateLM):
                         else:
                             input_seq = x_t[:, cache_length:]
                             if cache_length >= x_t.shape[1]:
-                                print("cache length > x_t shape")
                                 break
                     else:
                         print(f"⚠️  No active blocks at step {step}!")
                         break
                 
                 if input_seq.shape[1] == 0:
-                    break
+                    print(f"Warning: input_seq is empty at step {step}. Breaking generation loop.")
+                    raise Exception("input_seq is empty")
+                
                 
                 # Extract attention mask
                 input_length = input_seq.shape[1]
@@ -632,7 +662,6 @@ class DreamLoRABisection(TemplateLM):
                     input_length=input_length,
                     cache_length=cache_length
                 )
-
 
                 outputs = self.model(
                     input_seq,
@@ -683,11 +712,12 @@ class DreamLoRABisection(TemplateLM):
                             block_states[block_id]['state'] = 'to_cache'
                         continue
 
+
+                    
                     # Calculate relative position of logits
                     logit_offset = block_start - process_start_pos
                     block_rel_positions = torch.where(block_mask_index[0, block_start:block_end])[0]
-
-
+                    
                     if block_rel_positions.size(0) > 0:
                         block_mask_logits = logits[:, logit_offset + block_rel_positions, :]
                         
@@ -699,13 +729,15 @@ class DreamLoRABisection(TemplateLM):
                             neg_entropy=(self.sampling_strategy == "neg_entropy"),
                             margin_confidence=(self.sampling_strategy == "margin_confidence")
                         )
-
+                        
                         # Apply skip threshold
                         high_conf_indices = torch.where(initial_confidence > skip_threshold)[0]
                     
+                        # FIXED: If no high-confidence tokens, force decode the best one
                         if len(high_conf_indices) == 0 and len(initial_confidence) > 0:
                             best_idx = torch.argmax(initial_confidence)
-                            high_conf_indices = torch.tensor([best_idx], device=self.device)
+                            high_conf_indices = best_idx.unsqueeze(0)
+
                             if step % 20 == 0:
                                 print(f"    Forced decode 1 token with conf {initial_confidence[best_idx]:.3f}")
                             
@@ -743,11 +775,11 @@ class DreamLoRABisection(TemplateLM):
         print(f"First 20 tokens: {generated_sequence[:20]}")
         print(f"Is empty: {len(generated_sequence) == 0}")
         
-        print(f"\n=== Generation Complete ===")
-        print(f"Steps taken: {step}")
-        print(f"Total tokens (with masks): {len(all_tokens)}")
-        print(f"Masks remaining: {num_masks} ({100*num_masks/max(len(all_tokens),1):.1f}%)")
-        print(f"After filtering: {len(generated_sequence)} tokens")
+        # print(f"\n=== Generation Complete ===")
+        # print(f"Steps taken: {step}")
+        # print(f"Total tokens (with masks): {len(all_tokens)}")
+        # print(f"Masks remaining: {num_masks} ({100*num_masks/max(len(all_tokens),1):.1f}%)")
+        # print(f"After filtering: {len(generated_sequence)} tokens")
 
         return generated_sequence
 
@@ -761,54 +793,50 @@ class DreamLoRABisection(TemplateLM):
         bar = tqdm(total=len(requests), disable=(disable_tqdm or (self.rank != 0)), desc="Running generate_until requests")
         
         for i, req in enumerate(requests):
-            question = req.args[0]
-            gen_kwargs = req.args[1]
-            
-            contexts = [question]
-            if self.add_bos_token:
-                contexts = [self.tokenizer.bos_token + p for p in contexts]
-            
-            context_enc, attn_masks = self.tok_batch_encode(
-                contexts,
-                truncation=self.truncation,
-            )
+            try:  # ← TRY STARTS HERE, INSIDE THE LOOP
+                question = req.args[0]
+                gen_kwargs = req.args[1]
+                
+                contexts = [question]
+                if self.add_bos_token:
+                    contexts = [self.tokenizer.bos_token + p for p in contexts]
+                
+                context_enc, attn_masks = self.tok_batch_encode(
+                    contexts,
+                    truncation=self.truncation,
+                )
 
-            input_ids = context_enc[0].unsqueeze(0)
-            
-            if input_ids.shape[1] > self.max_length - self.max_new_tokens:
-                eval_logger.warning(f"Prompt length {input_ids.shape[1]} is larger than {self.max_length-self.max_new_tokens}, cutoff on the left side")
-                input_ids = input_ids[:, -(self.max_length-self.max_new_tokens):]
-            
-            # Use bisection sampling generation
-            generated_answer = self._generate_bisection_single(input_ids)
-        
-            # ADD THIS DEBUG:
-            print(f"\n=== generate_until received ===")
-            print(f"Sample {i}")
-            print(f"Type: {type(generated_answer)}")
-            print(f"Length: {len(generated_answer)}")
-            print(f"Is list: {isinstance(generated_answer, list)}")
-            print(f"First 10: {generated_answer[:10] if len(generated_answer) >= 10 else generated_answer}")
-            
-            cont_toks_list = self.tokenizer.batch_decode([generated_answer], skip_special_tokens=True)
-            s = cont_toks_list[0]
-            
-            # ADD THIS DEBUG:
-            print(f"Decoded string length: {len(s)}")
-            print(f"Decoded string: '{s[:100]}'")
-            print(f"Is empty: {len(s) == 0}")
+                input_ids = context_enc[0].unsqueeze(0)
+                
+                if input_ids.shape[1] > self.max_length - self.max_new_tokens:
+                    eval_logger.warning(f"Prompt length {input_ids.shape[1]} is larger than {self.max_length-self.max_new_tokens}, cutoff on the left side")
+                    input_ids = input_ids[:, -(self.max_length-self.max_new_tokens):]
+                
+                # Use bisection sampling generation
+                generated_answer = self._generate_bisection_single(input_ids)
+                
+                cont_toks_list = self.tokenizer.batch_decode([generated_answer], skip_special_tokens=True)
+                s = cont_toks_list[0]
 
-            if self.show_speed:
-                num_tokens += self._count_tokens_after_truncation(s, gen_kwargs.get("until", []))
-                num_nfe += 1
+                if self.show_speed:
+                    num_tokens += self._count_tokens_after_truncation(s, gen_kwargs.get("until", []))
+                    num_nfe += 1
+                
+                if not self.escape_until:
+                    for term in gen_kwargs.get("until", []):
+                        if len(term) > 0:
+                            s = s.split(term)[0]
+                
+                res.append(s)
+                
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    print(f"⚠️  CUDA error on sample {i}: {str(e)[:100]}")
+                    res.append("") 
+                else:
+                    raise
             
-            if not self.escape_until:
-                for term in gen_kwargs.get("until", []):
-                    if len(term) > 0:
-                        s = s.split(term)[0]
-            
-            res.append(s)
-            bar.update(1)
+            bar.update(1)  # ← ALWAYS UPDATE PROGRESS BAR
         
         bar.close()
         
@@ -843,21 +871,22 @@ class DreamLoRABisection(TemplateLM):
         
         return res
 
-    def _forward_process(self, batch):
-        b, l = batch.shape
-        u0 = torch.rand(1, device=batch.device, dtype=torch.float32)
-        indices = torch.arange(b, device=batch.device).float()
-        t = (u0 + indices / b) % 1
 
-        p_mask = (1 - self.sampling_eps) * t + self.sampling_eps
-        p_mask = p_mask[:, None].repeat(1, l)
+        def _forward_process(self, batch):
+            b, l = batch.shape
+            u0 = torch.rand(1, device=batch.device, dtype=torch.float32)
+            indices = torch.arange(b, device=batch.device).float()
+            t = (u0 + indices / b) % 1
 
-        mask_indices = torch.rand((b, l), device=batch.device) < p_mask
-        mask_indices[:, 0] = False
-        mask_indices[:, -1] = False
+            p_mask = (1 - self.sampling_eps) * t + self.sampling_eps
+            p_mask = p_mask[:, None].repeat(1, l)
 
-        noisy_batch = torch.where(mask_indices, self.mask_token_id, batch)
-        return noisy_batch, p_mask
+            mask_indices = torch.rand((b, l), device=batch.device) < p_mask
+            mask_indices[:, 0] = False
+            mask_indices[:, -1] = False
+
+            noisy_batch = torch.where(mask_indices, self.mask_token_id, batch)
+            return noisy_batch, p_mask
 
     @torch.no_grad()
     def get_logits(self, batch, prompt_index):

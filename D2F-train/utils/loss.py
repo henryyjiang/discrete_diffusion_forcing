@@ -2,126 +2,147 @@ import torch
 from utils.util import forward_process_length, shift_logits,forward_process
 import torch.nn.functional as F
 
-# def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size, eos_id):
-#     """
-#     Apply bisection sampling-aware masking strategy.
-    
-#     For each block, randomly sample a bisection iteration level j,
-#     then mask all positions that are NOT multiples of 2^j within that block.
-#     """
-#     B, L = input_ids.shape
-#     device = input_ids.device
-    
-#     # Create a copy for masking
-#     masked_input = input_ids.clone()
-#     masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
-#     p_mask = torch.ones_like(input_ids, dtype=torch.float32)
-    
-#     for batch_idx in range(B):
-#         prompt_len = prompt_lengths[batch_idx].item()
-        
-#         # Process each block
-#         l = prompt_len
-#         while l < L:
-#             r = min(l + block_size, L)
-#             block_len = r - l
-            
-#             if block_len == 0:
-#                 break
-            
-#             # Find k such that 2^k >= block_len
-#             k = 0
-#             while (1 << k) < block_len:
-#                 k += 1
-            
-#             # Sample a random bisection iteration j from [0, k-1]
-#             if k > 0:
-#                 j = torch.randint(0, k, (1,), device=device).item()
-#             else:
-#                 j = 0
-            
-#             # Create mask: exclude positions that are NOT multiples of 2^j
-#             step = 1 << j  # 2^j
-            
-#             # Compute masking probability for this block
-#             if k > 0:
-#                 mask_prob = sum(1 for j_test in range(k) 
-#                               if step != (1 << j_test)) / k
-#             else:
-#                 mask_prob = 1.0
-            
-#             for pos in range(l, r):
-#                 relative_pos = pos - l
-#                 # If position is NOT a multiple of 2^j, mask it
-#                 if relative_pos % step != 0:
-#                     # Ensure we don't go out of bounds
-#                     if pos < L:
-#                         masked_input[batch_idx, pos] = mask_id
-#                         masked_indices[batch_idx, pos] = True
-#                         p_mask[batch_idx, pos] = mask_prob if mask_prob > 0 else 1.0
-            
-#             l = r
-    
-#     # Ensure p_mask doesn't have zeros (would cause division by zero)
-#     p_mask = torch.clamp(p_mask, min=1e-8)
-    
-#     return masked_input, masked_indices, p_mask
-
-
 def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size, eos_id):
     """
-    Apply bisection sampling-aware masking strategy.
-    All blocks use the SAME randomly sampled j value (synchronized).
+    Correct uniform-j bisection masking with correct importance weighting:
+    
+    p_mask[t] = 1 / Pr(masking token t)
+    
+    NEW: Excludes special tokens from masking (they don't contribute to loss)
     """
     B, L = input_ids.shape
     device = input_ids.device
+    
+    # Define special tokens to exclude from training
+    special_tokens = {126081, 198}  # EOS, newline - add more as needed
     
     masked_input = input_ids.clone()
     masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
     p_mask = torch.ones_like(input_ids, dtype=torch.float32)
     
-    for batch_idx in range(B):
-        prompt_len = prompt_lengths[batch_idx].item()
+    for b in range(B):
+        prompt_len = prompt_lengths[b].item()
         
-        # Calculate k for the maximum block size
+        # Compute k so that 2^k >= block_size
         k = 0
         while (1 << k) < block_size:
             k += 1
         
-        # CHANGE: Sample ONE j value for ALL blocks in this sequence
+        # sample j uniformly from {0, 1, ..., k-1}
         if k > 0:
-            global_j = torch.randint(0, k, (1,), device=device).item()
+            j = torch.randint(0, k, (1,), device=device).item()
         else:
-            global_j = 0
+            j = 0
         
-        step = 1 << global_j  # 2^j
+        step = 1 << j
         
-        # Compute masking probability
-        if k > 0:
-            mask_prob = sum(1 for j_test in range(k) 
-                          if step != (1 << j_test)) / k
-        else:
-            mask_prob = 1.0
-        
-        # Process each block with the SAME j
+        # Precompute true mask probability for weighting:
+        valid_js = torch.arange(k, device=device)
+        steps = 1 << valid_js  # [1,2,4,8,...]
+
+        # process block by block
         l = prompt_len
         while l < L:
             r = min(l + block_size, L)
-            
+            block_len = r - l
+
             for pos in range(l, r):
-                relative_pos = pos - l
-                # If position is NOT a multiple of 2^j, mask it
-                if relative_pos % step != 0:
-                    if pos < L:
-                        masked_input[batch_idx, pos] = mask_id
-                        masked_indices[batch_idx, pos] = True
-                        p_mask[batch_idx, pos] = mask_prob if mask_prob > 0 else 1.0
+                rel = pos - l  # relative position inside block
+                
+                # NEW: Skip special tokens - don't mask them, don't include in loss
+                token_id = input_ids[b, pos].item()
+                if token_id in special_tokens:
+                    # Leave unmasked and mark as not-trainable
+                    masked_indices[b, pos] = False
+                    p_mask[b, pos] = 1e8  # Large value so 1/p_mask ≈ 0 in loss
+                    continue
+                
+                # determine if this j masks this position
+                if rel % step != 0:
+                    masked_input[b, pos] = mask_id
+                    masked_indices[b, pos] = True
+                
+                # Compute true masking probability:
+                # Count how many js satisfy (rel % (2^j') != 0)
+                rel_mod = (rel % steps) != 0  # boolean vector of shape [k]
+                mask_prob = rel_mod.float().mean().item()  # average over js
+                
+                # importance weight = 1 / P(mask)
+                if mask_prob > 0:
+                    p_mask[b, pos] = 1.0 / mask_prob
+                else:
+                    p_mask[b, pos] = 1e8  # extremely unlikely; avoid inf
             
             l = r
     
     p_mask = torch.clamp(p_mask, min=1e-8)
-    
     return masked_input, masked_indices, p_mask
+
+# def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size, eos_id):
+#     """
+#     Correct uniform-j bisection masking with correct importance weighting:
+    
+#     p_mask[t] = 1 / Pr(masking token t)
+#     """
+#     B, L = input_ids.shape
+#     device = input_ids.device
+    
+#     masked_input = input_ids.clone()
+#     masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
+#     p_mask = torch.ones_like(input_ids, dtype=torch.float32)
+    
+#     for b in range(B):
+#         prompt_len = prompt_lengths[b].item()
+        
+#         # Compute k so that 2^k >= block_size
+#         k = 0
+#         while (1 << k) < block_size:
+#             k += 1
+        
+#         # sample j uniformly from {0, 1, ..., k-1}
+#         # (not 0..k — we exclude level k because step >= block_size makes almost no masking)
+#         if k > 0:
+#             j = torch.randint(0, k, (1,), device=device).item()
+#         else:
+#             j = 0
+        
+#         step = 1 << j
+        
+#         # Precompute true mask probability for weighting:
+#         #   Pr(mask[t]) = (# of j' where t % (2^j') != 0) / k
+#         # Compute this per period within the block:
+#         valid_js = torch.arange(k, device=device)
+#         steps = 1 << valid_js  # [1,2,4,8,...]
+
+#         # process block by block
+#         l = prompt_len
+#         while l < L:
+#             r = min(l + block_size, L)
+#             block_len = r - l
+
+#             for pos in range(l, r):
+#                 rel = pos - l  # relative position inside block
+                
+#                 # determine if this j masks this position
+#                 if rel % step != 0:
+#                     masked_input[b, pos] = mask_id
+#                     masked_indices[b, pos] = True
+                
+#                 # Compute true masking probability:
+#                 # Count how many js satisfy (rel % (2^j') != 0)
+#                 rel_mod = (rel % steps) != 0  # boolean vector of shape [k]
+#                 mask_prob = rel_mod.float().mean().item()  # average over js
+                
+#                 # importance weight = 1 / P(mask)
+#                 if mask_prob > 0:
+#                     p_mask[b, pos] = 1.0 / mask_prob
+#                 else:
+#                     p_mask[b, pos] = 1e8  # extremely unlikely; avoid inf
+            
+#             l = r
+    
+#     p_mask = torch.clamp(p_mask, min=1e-8)
+#     return masked_input, masked_indices, p_mask
 
 def compute_bisection_sampling_aware_loss(
     input_ids,
@@ -184,16 +205,20 @@ def compute_bisection_sampling_aware_loss(
                 ).logits
                 ref_logits = torch.nn.functional.softmax(ref_logits, dim=-1)
         
-        token_loss = F.cross_entropy(
-            logits[masked_indices], 
-            ref_logits[masked_indices], 
-            reduction='none'
-        ) / p_mask[masked_indices]
+        student_log_probs = F.log_softmax(logits, dim=-1)
+        teacher_probs = F.softmax(ref_logits, dim=-1)
+
+        token_loss = F.kl_div(
+            student_log_probs[masked_indices],
+            teacher_probs[masked_indices],
+            reduction="none"
+        ).sum(dim=-1) / p_mask[masked_indices]
     else:
         token_loss = F.cross_entropy(
             logits[masked_indices], 
             input_ids[masked_indices], 
-            reduction='none'
+            reduction='none',
+            label_smoothing=0.05
         ) / p_mask[masked_indices]
     
     losses = {
@@ -275,7 +300,7 @@ def compute_loss(
         token_loss_2 = F.cross_entropy(logits[masked_indices], ref_logits[masked_indices], reduction='none') / p_mask[masked_indices]
         # print("token_loss_2",token_loss_2.shape)
     else:
-        token_loss_2= F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction='none') / p_mask[masked_indices]
+        token_loss_2= F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction='none', label_smoothing=0.05) / p_mask[masked_indices]
     losses = {
                 # 'loss_1': token_loss_2.mean() * 0,
                 'loss': token_loss_2.mean(),
@@ -304,7 +329,7 @@ def compute_normal_loss(
     noisy_batch = noisy_batch.to(denoiser.device)
     logits=denoiser(noisy_batch).logits
     logits=shift_logits(logits)
-    token_loss_2= F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction='none') / p_mask[masked_indices]
+    token_loss_2= F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction='none', label_smoothing=0.05) / p_mask[masked_indices]
     losses = {
                 # 'loss_1': token_loss_2.mean() * 0,
                 'loss': token_loss_2.mean(),
@@ -351,7 +376,7 @@ def compute_llada_loss(
         token_loss_2 = F.cross_entropy(logits[masked_indices], ref_logits[masked_indices], reduction='none') / p_mask[masked_indices]
         # print("token_loss_2",token_loss_2.shape)
     else:
-        token_loss_2= F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction='none') / p_mask[masked_indices]
+        token_loss_2= F.cross_entropy(logits[masked_indices], input_ids[masked_indices], reduction='none', label_smoothing=0.05) / p_mask[masked_indices]
     losses = {
                 # 'loss_1': token_loss_2.mean() * 0,
                 'loss': token_loss_2.mean(),
