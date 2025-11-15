@@ -2,17 +2,80 @@ import torch
 from utils.util import forward_process_length, shift_logits,forward_process
 import torch.nn.functional as F
 
+# def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size, eos_id):
+#     """
+#     Apply bisection sampling-aware masking strategy.
+    
+#     For each block, randomly sample a bisection iteration level j,
+#     then mask all positions that are NOT multiples of 2^j within that block.
+#     """
+#     B, L = input_ids.shape
+#     device = input_ids.device
+    
+#     # Create a copy for masking
+#     masked_input = input_ids.clone()
+#     masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
+#     p_mask = torch.ones_like(input_ids, dtype=torch.float32)
+    
+#     for batch_idx in range(B):
+#         prompt_len = prompt_lengths[batch_idx].item()
+        
+#         # Process each block
+#         l = prompt_len
+#         while l < L:
+#             r = min(l + block_size, L)
+#             block_len = r - l
+            
+#             if block_len == 0:
+#                 break
+            
+#             # Find k such that 2^k >= block_len
+#             k = 0
+#             while (1 << k) < block_len:
+#                 k += 1
+            
+#             # Sample a random bisection iteration j from [0, k-1]
+#             if k > 0:
+#                 j = torch.randint(0, k, (1,), device=device).item()
+#             else:
+#                 j = 0
+            
+#             # Create mask: exclude positions that are NOT multiples of 2^j
+#             step = 1 << j  # 2^j
+            
+#             # Compute masking probability for this block
+#             if k > 0:
+#                 mask_prob = sum(1 for j_test in range(k) 
+#                               if step != (1 << j_test)) / k
+#             else:
+#                 mask_prob = 1.0
+            
+#             for pos in range(l, r):
+#                 relative_pos = pos - l
+#                 # If position is NOT a multiple of 2^j, mask it
+#                 if relative_pos % step != 0:
+#                     # Ensure we don't go out of bounds
+#                     if pos < L:
+#                         masked_input[batch_idx, pos] = mask_id
+#                         masked_indices[batch_idx, pos] = True
+#                         p_mask[batch_idx, pos] = mask_prob if mask_prob > 0 else 1.0
+            
+#             l = r
+    
+#     # Ensure p_mask doesn't have zeros (would cause division by zero)
+#     p_mask = torch.clamp(p_mask, min=1e-8)
+    
+#     return masked_input, masked_indices, p_mask
+
+
 def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size, eos_id):
     """
     Apply bisection sampling-aware masking strategy.
-    
-    For each block, randomly sample a bisection iteration level j,
-    then mask all positions that are NOT multiples of 2^j within that block.
+    All blocks use the SAME randomly sampled j value (synchronized).
     """
     B, L = input_ids.shape
     device = input_ids.device
     
-    # Create a copy for masking
     masked_input = input_ids.clone()
     masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
     p_mask = torch.ones_like(input_ids, dtype=torch.float32)
@@ -20,41 +83,35 @@ def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size
     for batch_idx in range(B):
         prompt_len = prompt_lengths[batch_idx].item()
         
-        # Process each block
+        # Calculate k for the maximum block size
+        k = 0
+        while (1 << k) < block_size:
+            k += 1
+        
+        # CHANGE: Sample ONE j value for ALL blocks in this sequence
+        if k > 0:
+            global_j = torch.randint(0, k, (1,), device=device).item()
+        else:
+            global_j = 0
+        
+        step = 1 << global_j  # 2^j
+        
+        # Compute masking probability
+        if k > 0:
+            mask_prob = sum(1 for j_test in range(k) 
+                          if step != (1 << j_test)) / k
+        else:
+            mask_prob = 1.0
+        
+        # Process each block with the SAME j
         l = prompt_len
         while l < L:
             r = min(l + block_size, L)
-            block_len = r - l
-            
-            if block_len == 0:
-                break
-            
-            # Find k such that 2^k >= block_len
-            k = 0
-            while (1 << k) < block_len:
-                k += 1
-            
-            # Sample a random bisection iteration j from [0, k-1]
-            if k > 0:
-                j = torch.randint(0, k, (1,), device=device).item()
-            else:
-                j = 0
-            
-            # Create mask: exclude positions that are NOT multiples of 2^j
-            step = 1 << j  # 2^j
-            
-            # Compute masking probability for this block
-            if k > 0:
-                mask_prob = sum(1 for j_test in range(k) 
-                              if step != (1 << j_test)) / k
-            else:
-                mask_prob = 1.0
             
             for pos in range(l, r):
                 relative_pos = pos - l
                 # If position is NOT a multiple of 2^j, mask it
                 if relative_pos % step != 0:
-                    # Ensure we don't go out of bounds
                     if pos < L:
                         masked_input[batch_idx, pos] = mask_id
                         masked_indices[batch_idx, pos] = True
@@ -62,11 +119,9 @@ def bisection_sampling_aware_mask(input_ids, prompt_lengths, mask_id, block_size
             
             l = r
     
-    # Ensure p_mask doesn't have zeros (would cause division by zero)
     p_mask = torch.clamp(p_mask, min=1e-8)
     
     return masked_input, masked_indices, p_mask
-
 
 def compute_bisection_sampling_aware_loss(
     input_ids,

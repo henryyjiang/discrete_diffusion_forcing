@@ -51,7 +51,7 @@ train:
 
   enable_shift: true
   share_steps: 2
-  self_align: true
+  self_align: false
   feature_align: false
   self_step: true
 

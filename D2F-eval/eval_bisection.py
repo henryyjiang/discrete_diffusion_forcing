@@ -189,7 +189,7 @@ class DreamLoRABisection(TemplateLM):
         escape_until: Optional[bool] = False,
         block_size: Optional[int] = 4,
         mask_token_id: Optional[int] = 126336,
-        skip_threshold: Optional[float] = 0.9,
+        skip_threshold: Optional[float] = 0.5,
         sampling_strategy: Optional[str] = "default",
         save_dir: Optional[str] = None,
         show_speed: Optional[bool] = True,
@@ -530,12 +530,16 @@ class DreamLoRABisection(TemplateLM):
                 k = 0
                 while (1 << k) < block_length:
                     k += 1
+
+                random_j = torch.randint(0, k, (1,), device=self.device).item() if k > 0 else 0
+
                 
                 block_states[new_block_id] = {
                     'start_pos': new_start_pos,
                     'end_pos': new_start_pos + block_size,
                     'state': 'active',
-                    'current_j': k-1,
+                    # 'current_j': k-1,
+                    'current_j': random_j,
                     'k': k,  # Maximum bisection level
                 }
             
@@ -546,12 +550,19 @@ class DreamLoRABisection(TemplateLM):
                 mask_index = (x_t == mask_id)
                 if mask_index.sum() == 0:
                     break
-                
-                # Check if we should add more blocks
+               
                 if len(block_states) - 1 < (self.max_new_tokens // block_size) and not eos_detected:
-                    # Check if the last block has progressed enough
                     last_block_id = max(block_states.keys())
-                    if block_states[last_block_id]['state'] in ['to_cache', 'cached']:
+                    last_block = block_states[last_block_id]
+                    
+                    # Check if last block is making good progress (at least halfway through iterations)
+                    if last_block['state'] in ['to_cache', 'cached']:
+                        # Fully complete - definitely add new block
+                        should_add = True
+                    else:
+                        should_add = False
+                    
+                    if should_add:
                         # Add a new block
                         new_block_id = len(block_states)
                         new_start_pos = x_t.shape[1]
@@ -566,10 +577,10 @@ class DreamLoRABisection(TemplateLM):
                             'start_pos': new_start_pos,
                             'end_pos': new_start_pos + block_size,
                             'state': 'active',
-                            'current_j':k-1,
+                            'current_j': k-1,
                             'k': k,
                         }
-               
+
                 
                 # Determine blocks to cache (completed blocks)
                 blocks_to_cache = [bid for bid, state in block_states.items() 
@@ -604,8 +615,10 @@ class DreamLoRABisection(TemplateLM):
                         else:
                             input_seq = x_t[:, cache_length:]
                             if cache_length >= x_t.shape[1]:
+                                print("cache length > x_t shape")
                                 break
                     else:
+                        print(f"⚠️  No active blocks at step {step}!")
                         break
                 
                 if input_seq.shape[1] == 0:
@@ -619,6 +632,7 @@ class DreamLoRABisection(TemplateLM):
                     input_length=input_length,
                     cache_length=cache_length
                 )
+
 
                 outputs = self.model(
                     input_seq,
@@ -661,18 +675,19 @@ class DreamLoRABisection(TemplateLM):
                         if not bisection_mask[i]:  # This position should be unmasked in iteration j
                             block_mask_index[:, abs_pos] = False
                     
+                    # Check if iteration just completed (after decoding in this step)
                     if block_mask_index.sum() == 0:
                         # Current iteration complete, advance to next j
                         block_states[block_id]['current_j'] -= 1
                         if block_states[block_id]['current_j'] < 0:
-                            # All bisection iterations complete
                             block_states[block_id]['state'] = 'to_cache'
                         continue
-                    
+
                     # Calculate relative position of logits
                     logit_offset = block_start - process_start_pos
                     block_rel_positions = torch.where(block_mask_index[0, block_start:block_end])[0]
-                    
+
+
                     if block_rel_positions.size(0) > 0:
                         block_mask_logits = logits[:, logit_offset + block_rel_positions, :]
                         
@@ -684,10 +699,16 @@ class DreamLoRABisection(TemplateLM):
                             neg_entropy=(self.sampling_strategy == "neg_entropy"),
                             margin_confidence=(self.sampling_strategy == "margin_confidence")
                         )
-                        
+
                         # Apply skip threshold
                         high_conf_indices = torch.where(initial_confidence > skip_threshold)[0]
-                        
+                    
+                        if len(high_conf_indices) == 0 and len(initial_confidence) > 0:
+                            best_idx = torch.argmax(initial_confidence)
+                            high_conf_indices = torch.tensor([best_idx], device=self.device)
+                            if step % 20 == 0:
+                                print(f"    Forced decode 1 token with conf {initial_confidence[best_idx]:.3f}")
+                            
                         # Update tokens
                         if len(high_conf_indices) > 0:
                             for idx in high_conf_indices:
@@ -695,39 +716,39 @@ class DreamLoRABisection(TemplateLM):
                                 x_t[0, abs_pos] = x0[idx]
                             
                             # Check for EOS
-                            eos_token_id = 126081
-                            if eos_token_id is not None:
-                                for idx in high_conf_indices:
-                                    if x0[idx].item() == eos_token_id:
-                                        eos_detected = True
-                                        break
-                        
-                        # Check if current iteration j is complete
-                        mask_index = (x_t == mask_id)
-                        block_mask_index = mask_index.clone()
-                        block_mask_index[:, :block_start] = False
-                        block_mask_index[:, block_end:] = False
-                        
-                        # Filter by bisection mask
-                        for i in range(block_length):
-                            abs_pos = block_start + i
-                            if not bisection_mask[i]:
-                                block_mask_index[:, abs_pos] = False
-                        
-                        if block_mask_index.sum() == 0:
-                            # Current iteration complete
-                            block_states[block_id]['current_j'] -= 1
-                            if block_states[block_id]['current_j'] < 0:
-                                block_states[block_id]['state'] = 'to_cache'
+                            # eos_token_id = 126081
+                            # if eos_token_id is not None:
+                            #     for idx in high_conf_indices:
+                            #         if x0[idx].item() == eos_token_id:
+                            #             eos_detected = True
+                            #             break
 
                 if update_kvcache > 0:
                     cache_length += update_kvcache
                 
-                if step > 250:
+                if step > 500:
                     print(f"WARNING: Hit safety check at step {step}. Exiting generation loop.")
                     break
+
+        # FIXED: Filter out mask tokens
+        all_tokens = x_t[0, prompt.shape[1]:].tolist()
+        generated_sequence = [t for t in all_tokens if t != self.mask_token_id]
         
-        generated_sequence = x_t[0, prompt.shape[1]:].tolist()
+        num_masks = sum(1 for t in all_tokens if t == self.mask_token_id)
+        
+        print(f"\n=== _generate_bisection_single RETURN ===")
+        print(f"all_tokens length: {len(all_tokens)}")
+        print(f"Mask count: {num_masks}")
+        print(f"After filter length: {len(generated_sequence)}")
+        print(f"First 20 tokens: {generated_sequence[:20]}")
+        print(f"Is empty: {len(generated_sequence) == 0}")
+        
+        print(f"\n=== Generation Complete ===")
+        print(f"Steps taken: {step}")
+        print(f"Total tokens (with masks): {len(all_tokens)}")
+        print(f"Masks remaining: {num_masks} ({100*num_masks/max(len(all_tokens),1):.1f}%)")
+        print(f"After filtering: {len(generated_sequence)} tokens")
+
         return generated_sequence
 
     def generate_until(self, requests: List[Instance], disable_tqdm: bool = False):
@@ -760,10 +781,23 @@ class DreamLoRABisection(TemplateLM):
             
             # Use bisection sampling generation
             generated_answer = self._generate_bisection_single(input_ids)
+        
+            # ADD THIS DEBUG:
+            print(f"\n=== generate_until received ===")
+            print(f"Sample {i}")
+            print(f"Type: {type(generated_answer)}")
+            print(f"Length: {len(generated_answer)}")
+            print(f"Is list: {isinstance(generated_answer, list)}")
+            print(f"First 10: {generated_answer[:10] if len(generated_answer) >= 10 else generated_answer}")
             
             cont_toks_list = self.tokenizer.batch_decode([generated_answer], skip_special_tokens=True)
             s = cont_toks_list[0]
             
+            # ADD THIS DEBUG:
+            print(f"Decoded string length: {len(s)}")
+            print(f"Decoded string: '{s[:100]}'")
+            print(f"Is empty: {len(s) == 0}")
+
             if self.show_speed:
                 num_tokens += self._count_tokens_after_truncation(s, gen_kwargs.get("until", []))
                 num_nfe += 1
